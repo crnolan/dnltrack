@@ -23,7 +23,7 @@ cv2.waitKey(1)
 
 import av
 
-fps = 5.
+fps = 12.
 codec = "hevc" # H265 by default
 # codec = "h264"
 if 2 <= len(sys.argv):
@@ -62,6 +62,10 @@ controlIn.setStreamName('control')
 # controlIn.out.link(camRight.inputControl)
 controlIn.out.link(camLeft.inputControl)
 
+rgbControlIn = pipeline.createXLinkIn()
+rgbControlIn.setStreamName('rgbControl')
+rgbControlIn.out.link(camRgb.inputControl)
+
 # Properties
 videoEnc = pipeline.create(dai.node.VideoEncoder)
 videoEnc.setDefaultProfilePreset(fps, get_encoder_profile(codec))
@@ -82,11 +86,22 @@ with dai.Device(pipeline) as device:
 
     # Control queue used to set camera properties
     controlQueue = device.getInputQueue(controlIn.getStreamName())
+    rgbControlQueue = device.getInputQueue(rgbControlIn.getStreamName())
 
+    print('Setting frame sync mode')
     ctrl = dai.CameraControl()
     ctrl.setFrameSyncMode(dai.RawCameraControl.FrameSyncMode.OUTPUT)
     # ctrl.setStrobeSensor(1)
     controlQueue.send(ctrl)
+    print('Frame sync mode set')
+
+    # ctrl = dai.CameraControl()
+    # ctrl.setStrobeExternal(41, 1)
+    # controlQueue.send(ctrl)
+
+    # ctrl = dai.CameraControl()
+    # ctrl.setManualWhiteBalance(1000)
+    # rgbControlQueue.send(ctrl)
 
     # device.setIrFloodLightBrightness(300)
 
