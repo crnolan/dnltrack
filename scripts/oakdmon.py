@@ -6,6 +6,7 @@ import time
 import sys
 import cv2
 import numpy as np
+from sys import getsizeof
 
 # black= np.zeros([200,250,1],dtype="uint8")
 # cv2.imshow("Black Image",black)
@@ -23,9 +24,10 @@ cv2.waitKey(1)
 
 import av
 
-fps = 12.
-codec = "hevc" # H265 by default
-# codec = "h264"
+bwFps = 60.
+rgbFps= 30.
+# codec = "hevc" # H265 by default
+codec = "h264"
 if 2 <= len(sys.argv):
     codec = sys.argv[1].lower()
     if codec == "h265": codec = "hevc"
@@ -43,18 +45,18 @@ pipeline = dai.Pipeline()
 
 # Define sources and output
 camRgb = pipeline.create(dai.node.ColorCamera)
-camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-camRgb.setFps(fps)
+camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_720_P)
+camRgb.setFps(rgbFps)
 
 camLeft = pipeline.create(dai.node.MonoCamera)
 camLeft.setBoardSocket(dai.CameraBoardSocket.LEFT)
-# camLeft.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
-camLeft.setFps(fps)
+camLeft.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+camLeft.setFps(bwFps)
 # camLeft.setStrobeExternal()
 camRight = pipeline.create(dai.node.MonoCamera)
 camRight.setBoardSocket(dai.CameraBoardSocket.RIGHT)
-# camLeft.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
-camRight.setFps(fps)
+camLeft.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+camRight.setFps(bwFps)
 
 # Camera control (exp, iso, focus)
 controlIn = pipeline.createXLinkIn()
@@ -67,15 +69,27 @@ rgbControlIn.setStreamName('rgbControl')
 rgbControlIn.out.link(camRgb.inputControl)
 
 # Properties
-videoEnc = pipeline.create(dai.node.VideoEncoder)
-videoEnc.setDefaultProfilePreset(fps, get_encoder_profile(codec))
+leftEnc = pipeline.create(dai.node.VideoEncoder)
+leftEnc.setDefaultProfilePreset(bwFps, get_encoder_profile("h264"))
+rightEnc = pipeline.create(dai.node.VideoEncoder)
+rightEnc.setDefaultProfilePreset(bwFps, get_encoder_profile("h264"))
+# rgbEnc = pipeline.create(dai.node.VideoEncoder)
+# rgbEnc.setDefaultProfilePreset(rgbFps, get_encoder_profile("h264"))
 # videoEnc.setLossless(True) # Lossless MJPEG, video players usually don't support it
-camRgb.video.link(videoEnc.input)
-# camMono.out.link(videoEnc.input)
+# camRgb.video.link(videoEnc.input)
+camLeft.out.link(leftEnc.input)
+camRight.out.link(rightEnc.input)
+# camRgb.video.link(rgbEnc.input)
 
-xout = pipeline.create(dai.node.XLinkOut)
-xout.setStreamName('enc')
-videoEnc.bitstream.link(xout.input)
+leftXOut = pipeline.create(dai.node.XLinkOut)
+leftXOut.setStreamName('leftenc')
+leftEnc.bitstream.link(leftXOut.input)
+rightXOut = pipeline.create(dai.node.XLinkOut)
+rightXOut.setStreamName('rightenc')
+rightEnc.bitstream.link(rightXOut.input)
+# rgbXOut = pipeline.create(dai.node.XLinkOut)
+# rgbXOut.setStreamName('rgbenc')
+# rgbEnc.bitstream.link(rgbXOut.input)
 
 
 # Connect to device and start pipeline
@@ -88,12 +102,10 @@ with dai.Device(pipeline) as device:
     controlQueue = device.getInputQueue(controlIn.getStreamName())
     rgbControlQueue = device.getInputQueue(rgbControlIn.getStreamName())
 
-    print('Setting frame sync mode')
     ctrl = dai.CameraControl()
-    ctrl.setFrameSyncMode(dai.RawCameraControl.FrameSyncMode.OUTPUT)
+    # ctrl.setFrameSyncMode(dai.RawCameraControl.FrameSyncMode.OUTPUT)
     # ctrl.setStrobeSensor(1)
-    controlQueue.send(ctrl)
-    print('Frame sync mode set')
+    # controlQueue.send(ctrl)
 
     # ctrl = dai.CameraControl()
     # ctrl.setStrobeExternal(41, 1)
@@ -106,10 +118,12 @@ with dai.Device(pipeline) as device:
     # device.setIrFloodLightBrightness(300)
 
     # Output queue will be used to get the encoded data from the output defined above
-    q = device.getOutputQueue(name="enc", maxSize=30, blocking=True)
+    leftQ = device.getOutputQueue(name="leftenc", maxSize=30, blocking=True)
+    rightQ = device.getOutputQueue(name="rightenc", maxSize=30, blocking=True)
+    # rgbQ = device.getOutputQueue(name="rgbenc", maxSize=30, blocking=True)
 
     output_container = av.open('video.mp4', 'w')
-    stream = output_container.add_stream(codec, rate=fps)
+    stream = output_container.add_stream('h264', rate=bwFps)
     stream.time_base = Fraction(1, 1000 * 1000) # Microseconds
 
     if codec == "mjpeg":
@@ -117,10 +131,17 @@ with dai.Device(pipeline) as device:
         stream.pix_fmt = "yuvj420p"
 
     start = time.time()
+    nbytes = 0
     try:
         while True:
-            data = q.get().getData() # np.array
-            packet = av.Packet(data) # Create new packet with byte array
+            leftData = leftQ.get().getData() # np.array
+            nbytes += leftData.shape[0]
+            rightData = rightQ.get().getData() # np.array
+            nbytes += rightData.shape[0]
+            # rgbData = rgbQ.get().getData() # np.array
+            # nbytes += rgbData.shape[0]
+            print('Average data rate: {}'.format(nbytes / (time.time() - start)))
+            packet = av.Packet(leftData) # Create new packet with byte array
 
             # Set frame timestamp
             packet.pts = int((time.time() - start) * 1000 * 1000)
