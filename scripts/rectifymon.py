@@ -19,7 +19,8 @@ from sys import getsizeof
 # https://github.com/PyAV-Org/PyAV/issues/978
 # https://github.com/opencv/opencv/issues/21952
 cv2.startWindowThread()
-cv2.namedWindow('rgb', cv2.WND_PROP_AUTOSIZE)
+cv2.namedWindow('left', cv2.WND_PROP_AUTOSIZE)
+cv2.namedWindow('right', cv2.WND_PROP_AUTOSIZE)
 cv2.waitKey(1)
 
 import av
@@ -38,8 +39,8 @@ def get_encoder_profile(codec):
     else: return dai.VideoEncoderProperties.Profile.H265_MAIN
 
 # Get an AV codec
-avcodec_left = av.CodecContext.create(codec, "r")
-avcodec_right = av.CodecContext.create(codec, "r")
+avcodec_left = av.CodecContext.create('h264', "r")
+avcodec_right = av.CodecContext.create('h264', "r")
 # avcodec_rgb = av.CodecContext.create('hevc', "r")
 
 # Create pipeline
@@ -66,9 +67,18 @@ controlIn.setStreamName('control')
 # controlIn.out.link(camRight.inputControl)
 controlIn.out.link(camLeft.inputControl)
 
-# rgbControlIn = pipeline.createXLinkIn()
-# rgbControlIn.setStreamName('rgbControl')
-# rgbControlIn.out.link(camRgb.inputControl)
+stereo = pipeline.create(dai.node.StereoDepth)
+
+# Better handling for occlusions:
+stereo.setLeftRightCheck(False)
+# Closer-in minimum depth, disparity range is doubled:
+stereo.setExtendedDisparity(True)
+# Better accuracy for longer distance, fractional disparity 32-levels:
+stereo.setSubpixel(False)
+
+# Define and configure MonoCamera nodes beforehand
+camLeft.out.link(stereo.left)
+camRight.out.link(stereo.right)
 
 # Properties
 leftEnc = pipeline.create(dai.node.VideoEncoder)
@@ -78,9 +88,8 @@ rightEnc.setDefaultProfilePreset(bwFps, get_encoder_profile("h264"))
 # rgbEnc = pipeline.create(dai.node.VideoEncoder)
 # rgbEnc.setDefaultProfilePreset(rgbFps, get_encoder_profile("hevc"))
 # videoEnc.setLossless(True) # Lossless MJPEG, video players usually don't support it
-camLeft.out.link(leftEnc.input)
-camRight.out.link(rightEnc.input)
-# camRgb.video.link(rgbEnc.input)
+stereo.rectifiedLeft.link(leftEnc.input)
+stereo.rectifiedRight.link(rightEnc.input)
 
 leftXOut = pipeline.create(dai.node.XLinkOut)
 leftXOut.setStreamName('leftenc')
@@ -142,7 +151,9 @@ with dai.Device(pipeline) as device:
     print('Starting capture')
     start = time.time()
     nbytes = 0
-    image = np.zeros((720, 1280, 3))
+    imageLeft = np.zeros((360, 640, 3))
+    imageRight = np.zeros((360, 640, 3))
+    # image = np.zeros((720, 1280, 3))
     try:
         while True:
             leftData = leftQ.get().getData() # np.array
@@ -170,16 +181,21 @@ with dai.Device(pipeline) as device:
             # Decode the image and display
             frames_left = avcodec_left.decode(av.Packet(leftData.copy()))
             frames_right = avcodec_right.decode(av.Packet(rightData.copy()))
-            # frames_rgb = avcodec_rgb.decode(packet_rgb)
             # Retrieve 'bgr' (opencv format) frame
+            # if len(frames_left) > 0:
+            #     image = np.concatenate([np.array(frames_left[0].to_image().convert('RGB'))[::2, ::2, ::-1],
+            #                             image[360:, :, :]])
+            #     # image[360:, :, :] = np.array(frames_left[0].to_image().convert('RGB'))[::2, ::2, ::-1]
+            # if len(frames_right) > 0:
+            #     image = np.concatenate([image[:360, :, :],
+            #                             np.array(frames_right[0].to_image().convert('RGB'))[::2, ::2, ::-1]])
+            #     # image[360:, 640:, :] = np.array(frames_right[0].to_image().convert('RGB'))[::2, ::2, ::-1]
             if len(frames_left) > 0:
-                image[:360, :640, :] = np.array(frames_left[0].to_image().convert('RGB'))[::2, ::2, :]
-                image[360:, :640, :] = np.array(frames_left[0].to_image().convert('RGB'))[::2, ::2, ::-1]
+                imageLeft = np.array(frames_left[0].to_image().convert('RGB'))[::2, ::2, ::-1]
             if len(frames_right) > 0:
-                image[:360, 640:, :] = np.array(frames_right[0].to_image().convert('RGB'))[::2, ::2, ::-1]
-                image[360:, 640:, :] = np.array(frames_right[0].to_image().convert('RGB'))[::2, ::2, ::-1]
-
-            cv2.imshow("rgb", image)
+                imageRight = np.array(frames_right[0].to_image().convert('RGB'))[::2, ::2, ::-1]
+            cv2.imshow("left", imageLeft)
+            cv2.imshow("right", imageRight)
             cv2.waitKey(1)
 
     except KeyboardInterrupt:
