@@ -20,36 +20,39 @@ if __name__ == '__main__':
     cv2.waitKey(1)
 
 
-def create_bw_cam(pipeline, stereo, stream_name, left=True, fps=60):
-    cam = pipeline.create(dai.node.MonoCamera)
-    if left:
-        cam.setBoardSocket(dai.CameraBoardSocket.LEFT)
-    else:
-        cam.setBoardSocket(dai.CameraBoardSocket.RIGHT)
-    cam.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
-    cam.setFps(fps)
-    if left:
-        cam.out.link(stereo.left)
-    else:
-        cam.out.link(stereo.right)
-    enc = pipeline.create(dai.node.VideoEncoder)
-    enc.setDefaultProfilePreset(
-        fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
-    if left:
-        stereo.rectifiedLeft.link(enc.input)
-    else:
-        stereo.rectifiedRight.link(enc.input)
-    xout = pipeline.create(dai.node.XLinkOut)
-    xout.setStreamName(stream_name)
-    enc.bitstream.link(xout.input)
-
-
 def create_pipeline(fps, left_name, right_name):
     pipeline = dai.Pipeline()
     stereo = pipeline.create(dai.node.StereoDepth)
-    stereo.setExtendedDisparity(True)
-    create_bw_cam(pipeline, stereo, left_name, True, fps)
-    create_bw_cam(pipeline, stereo, right_name, False, fps)
+    # stereo.setExtendedDisparity(True)
+    left = pipeline.create(dai.node.MonoCamera)
+    left.setBoardSocket(dai.CameraBoardSocket.LEFT)
+    left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+    left.setFps(fps)
+    right = pipeline.create(dai.node.MonoCamera)
+    right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
+    right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+    right.setFps(fps)
+
+    left_enc = pipeline.create(dai.node.VideoEncoder)
+    left_enc.setDefaultProfilePreset(
+        fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
+    right_enc = pipeline.create(dai.node.VideoEncoder)
+    right_enc.setDefaultProfilePreset(
+        fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
+
+    # left.out.link(left_enc.input)
+    # right.out.link(right_enc.input)
+    left.out.link(stereo.left)
+    right.out.link(stereo.right)
+    stereo.rectifiedLeft.link(left_enc.input)
+    stereo.rectifiedRight.link(right_enc.input)
+    left_xout = pipeline.create(dai.node.XLinkOut)
+    left_xout.setStreamName(left_name)
+    right_xout = pipeline.create(dai.node.XLinkOut)
+    right_xout.setStreamName(right_name)
+    left_enc.bitstream.link(left_xout.input)
+    right_enc.bitstream.link(right_xout.input)
+    
     return pipeline
 
 
@@ -123,7 +126,7 @@ def decode_thread(decode_q, display_q, quit_event, name):
                 try:
                     display_q.put(image[::2, ::2, ::-1], block=False)
                 except queue.Full:
-                    logging.warn('Dropped decoded image for {}'.format(name))
+                    logging.warning('Dropped decoded image for {}'.format(name))
         except queue.Empty:
             pass
 
@@ -198,7 +201,7 @@ class CameraCapture():
             self.name))
 
 if __name__ == '__main__':
-    fps = 40
+    fps = 60
     height = 720
     width = 1280
     # codec = 'h264_nvenc'
