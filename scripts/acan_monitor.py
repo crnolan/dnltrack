@@ -65,25 +65,28 @@ def write_thread(in_q, quit_event, filename, width, height, fps):
     # codec = 'h264_nvenc'
     output_container = av.open(filename, 'w')
     stream = output_container.add_stream(codec, fps)
-    stream.time_base = Fraction(1, 1000*1000) # Milliseconds
-    t0 = int(time.time()*1000*1000)
+    stream.time_base = Fraction(1, 1000*1000) # Nanoseconds
+    # stream.time_base = Fraction(1, )
+    logging.debug('Timebase == {}'.format(stream.time_base))
+    # t0 = int(time.time_ns())
     nbytes = 0
     stream.width = width
     stream.height = height
-    logging.info('Start encoding')
+    logging.info('Start writing')
     write_count = 0
     while not quit_event.is_set():
         try:
             logging.debug('Writer waiting for data...')
             data = in_q.get(timeout=1)
-            ts = int(time.time()*1000*1000) - t0
+            # ts = int(time.time_ns()) - t0
             logging.debug('Writer got data...')
-            write_count += 1
             nbytes += data.shape[0]
             packet = av.Packet(data)
-            packet.pts = ts
-            packet.dts = ts
+            packet.pts = write_count * 1e6 / fps
+            packet.dts = write_count * 1e6 / fps
+            # logging.debug('Writing pts / dts == {} at time == {}'.format(ts, time.time_ns()))
             output_container.mux_one(packet)
+            write_count += 1
         except queue.Empty:
             pass
     
@@ -94,15 +97,15 @@ def write_thread(in_q, quit_event, filename, width, height, fps):
         logging.info('Writer looking for remaining data...')
         while True:
             data = in_q.get(block=False)
-            ts = int(time.time()*1000*1000) - t0
+            # ts = int(time.time()*1000*1000) - t0
             logging.debug('Writer got extra data...')
-            write_count += 1
             nbytes += data.shape[0]
             packet = av.Packet(data)
-            packet.pts = ts
-            packet.dts = ts
+            packet.pts = write_count * 1e6 / fps
+            packet.dts = write_count * 1e6 / fps
             logging.debug('Muxing packet...')
             output_container.mux_one(packet)
+            write_count += 1
     except queue.Empty:
         pass
 
@@ -136,26 +139,29 @@ def capture_thread(device_q, write_q, decode_q, quit_event, name):
 
     logging.info('Capture thread started for camera {}'.format(name))
     capture_count = 0
+    # t0 = int(time.time_ns())
     while not quit_event.is_set():
         data = device_q.get().getData()
+        # ts = int(time.time_ns()) - t0
         capture_count += 1
         try:
             # If the encoder is not running, this will cause an indefinite
             # thread lock. I should probably have a warning loop on it.
             write_q.put(data)
         except queue.Full:
-            logging.warn('Encoding queue full, dropped frame!')
+            logging.warning('Encoding queue full, dropped frame!')
         try:
             decode_q.put(data, block=False)
         except queue.Full:
-            logging.warn('Display queue full, showing reduced framerate')
+            logging.warning('Display queue full, showing reduced framerate')
     logging.info('Capture count for camera {}: {}'.format(name, capture_count))
 
 
 class CameraCapture():
     def __init__(self, device_q, name, fps, width, height):
         self.name = name
-        self.filename = '{}.mp4'.format(name)
+        time_format = '%y%m%d_%H%M%S'
+        self.filename = '{}-{}.mp4'.format(name, time.strftime(time_format))
         self.fps = fps
         self.width  = width
         self.height = height
@@ -214,26 +220,30 @@ if __name__ == '__main__':
 
     device_infos = dai.Device.getAllAvailableDevices()
     print(f'Found {len(device_infos)} devices')
+    print(device_infos)
     
     with contextlib.ExitStack() as stack:
         openvino_version = dai.OpenVINO.Version.VERSION_2021_4
-        queues = {}
-        threads = []
-        for dev in device_infos:
+        caps = []
+        ordered_devs = [dai.Device.getDeviceByMxId('18443010C1A4631200'),
+                        dai.Device.getDeviceByMxId('194430106195F41200')]
+        stream_names = [['box1', 'box2'],
+                        ['box4', 'box3']]
+        for dev, sn in zip(device_infos, stream_names):
             time.sleep(1) # Currently required due to XLink race issues
             device: dai.Device = stack.enter_context(
                 dai.Device(openvino_version, dev, False))
-            device.startPipeline(create_pipeline(fps, 'left', 'right'))
-            logging.warn(device.getOutputQueueNames())
-            left_q = device.getOutputQueue('left', maxSize=fps, blocking=True)
-            right_q = device.getOutputQueue('right', maxSize=fps, blocking=True)
-            left = CameraCapture(left_q, 'left', fps, width, height)
-            right = CameraCapture(right_q, 'right', fps, width, height)
+            device.startPipeline(create_pipeline(fps, *sn))
+            logging.warning(device.getOutputQueueNames())
+            left_q = device.getOutputQueue(sn[0], maxSize=fps, blocking=True)
+            right_q = device.getOutputQueue(sn[1], maxSize=fps, blocking=True)
+            left = CameraCapture(left_q, sn[0], fps, width, height)
+            right = CameraCapture(right_q, sn[1], fps, width, height)
             left.start_threads()
             right.start_threads()
+            caps.append([left, right])
 
         try:
-            caps = [left, right]
             images = [np.zeros((int(height/2), int(width/2), 3)) for i in range(len(caps))]
             while True:
                 changed = False
@@ -245,7 +255,9 @@ if __name__ == '__main__':
                         pass
                 if changed:
                     # print('Image sizes: {}x{}x{} and {}x{}x{}'.format(*images[0].shape, *images[1].shape))
-                    cv2.imshow('RodentVision', np.concatenate(images, axis=1))
+                    disp_im = np.concatenate(np.concatenate(images[0], axis=1),
+                                             np.concatenate(images[1], axis=1))
+                    cv2.imshow('RodentVision', disp_im)
                     cv2.waitKey(1)
         except KeyboardInterrupt:
             for cap in caps:
