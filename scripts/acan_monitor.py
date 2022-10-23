@@ -129,7 +129,7 @@ def decode_thread(decode_q, display_q, quit_event, name):
                 try:
                     display_q.put(image[::2, ::2, ::-1], block=False)
                 except queue.Full:
-                    logging.warning('Dropped decoded image for {}'.format(name))
+                    logging.debug('Display queue full for {}'.format(name))
         except queue.Empty:
             pass
 
@@ -165,7 +165,7 @@ class CameraCapture():
         self.fps = fps
         self.width  = width
         self.height = height
-        self.write_q = queue.Queue(maxsize=fps)
+        self.write_q = queue.Queue(maxsize=fps*10)
         self.decode_q = queue.Queue(maxsize=1)
         self.display_q = queue.Queue(maxsize=1)
         self.capture_quit = threading.Event()
@@ -187,12 +187,17 @@ class CameraCapture():
         self.write_thread.start()
         self.decode_thread.start()
         self.capture_thread.start()
-        while not (self.write_thread.is_alive() and
-                   self.decode_thread.is_alive() and
-                   self.capture_thread.is_alive()):
-            time.sleep(0.1)
+        # while not (self.write_thread.is_alive() and
+        #            self.decode_thread.is_alive() and
+        #            self.capture_thread.is_alive()):
+        #     time.sleep(0.1)
         logging.debug('Started threads for camera {}...'.format(
             self.name))
+
+    def start_capture(self):
+        logging.info('Starting capture for camera {}...'.format(
+            self.name
+        ))
 
     def stop_threads(self):
         logging.info('Stopping threads for camera {}...'.format(
@@ -207,7 +212,7 @@ class CameraCapture():
             self.name))
 
 if __name__ == '__main__':
-    fps = 60
+    fps = 30
     height = 720
     width = 1280
     # codec = 'h264_nvenc'
@@ -227,8 +232,10 @@ if __name__ == '__main__':
         caps = []
         ordered_devs = [dai.Device.getDeviceByMxId('18443010C1A4631200'),
                         dai.Device.getDeviceByMxId('194430106195F41200')]
+        # ordered_devs = [dai.Device.getDeviceByMxId('18443010C1A4631200')]
         stream_names = [['box1', 'box2'],
                         ['box4', 'box3']]
+        # stream_names = [['box1', 'box2']]
         for dev, sn in zip(device_infos, stream_names):
             time.sleep(1) # Currently required due to XLink race issues
             device: dai.Device = stack.enter_context(
@@ -244,31 +251,35 @@ if __name__ == '__main__':
             caps.append([left, right])
 
         try:
-            images = [np.zeros((int(height/2), int(width/2), 3)) for i in range(len(caps))]
+            images = [[np.zeros((int(height/2), int(width/2), 3))
+                       for i in range(2)]
+                      for i in range(len(caps))]
             while True:
                 changed = False
-                for i, cap in enumerate(caps):
-                    try:
-                        images[i] = cap.display_q.get(timeout=0.001)
-                        changed = True
-                    except queue.Empty:
-                        pass
+                for i, cap_row in enumerate(caps):
+                    for j, cap in enumerate(cap_row):
+                        try:
+                            images[i][j] = cap.display_q.get(timeout=0.001)
+                            changed = True
+                        except queue.Empty:
+                            pass
                 if changed:
                     # print('Image sizes: {}x{}x{} and {}x{}x{}'.format(*images[0].shape, *images[1].shape))
-                    disp_im = np.concatenate(np.concatenate(images[0], axis=1),
-                                             np.concatenate(images[1], axis=1))
+                    disp_im = np.concatenate([np.concatenate(imrow, axis=1) for imrow in images])
                     cv2.imshow('RodentVision', disp_im)
                     cv2.waitKey(1)
         except KeyboardInterrupt:
-            for cap in caps:
-                try:
-                    while True:
-                        cap.display_q.get_nowait()
-                except queue.Empty:
-                    pass
+            # for cap_row in caps:
+            #     for cap in cap_row:
+            #         try:
+            #             while True:
+            #                 cap.display_q.get_nowait()
+            #         except queue.Empty:
+            #             pass
             cv2.destroyAllWindows()
 
-        for cap in caps:
-            cap.stop_threads()
+        for cap_row in caps:
+            for cap in cap_row:
+                cap.stop_threads()
 
     logging.info('Exiting...')
