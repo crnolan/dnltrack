@@ -156,6 +156,7 @@ with dai.Device(pipeline) as device:
     # image = np.zeros((720, 1280, 3))
     try:
         while True:
+            ts = int((time.time() - start) * 1000 * 1000)
             leftData = leftQ.get().getData() # np.array
             nbytes += leftData.shape[0]
             rightData = rightQ.get().getData() # np.array
@@ -168,9 +169,11 @@ with dai.Device(pipeline) as device:
             # packet_rgb = av.Packet(rgbData)
 
             # Set frame timestamp
-            packet_left.pts = int((time.time() - start) * 1000 * 1000)
+            packet_left.pts = ts
+            packet_left.dts = ts
             # packet_left.time_base = timebase
-            packet_right.pts = int((time.time() - start) * 1000 * 1000)
+            packet_right.pts = ts
+            packet_right.dts = ts
             # packet_right.time_base = timebase
             # packet_rgb.pts = int((time.time() - start) * 1000 * 1000)
 
