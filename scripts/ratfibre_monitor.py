@@ -20,27 +20,37 @@ if __name__ == '__main__':
     cv2.waitKey(1)
 
 
-def create_pipeline(fps, left_name, right_name, depth_name, rgb_name):
+def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     pipeline = dai.Pipeline()
 
     stereo = pipeline.create(dai.node.StereoDepth)
     stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
     stereo.setExtendedDisparity(True)
+    stereo.setLeftRightCheck(True)
+    stereo.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_7x7)
+
+    # Calculate minZ and maxZ based on FOV and baseline
+    # DFOV / HFOV / VFOV: 150°/128°/80°
+    # Resolution: 1280x800
+    # min_distance = focal_length_in_pixels * base_line_dist / max_disparity_in_pixels
+    # focal_length_in_pixels = 1280 * 0.5 / tan(71.9 * 0.5 * PI / 180)
+    stereo.initialConfig.setDisparityShift(60)
 
     left = pipeline.create(dai.node.MonoCamera)
     left.setBoardSocket(dai.CameraBoardSocket.LEFT)
-    left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+    left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     left.setFps(fps)
     right = pipeline.create(dai.node.MonoCamera)
     right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
-    right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+    right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     right.setFps(fps)
 
     rgb = pipeline.create(dai.node.ColorCamera)
     rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
-    rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_720_P)
-    rgb.setVideoSize(640, 360)
+    rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
+    # rgb.setVideoSize(640, 360)
     rgb.setFps(fps)
+
 
     left_enc = pipeline.create(dai.node.VideoEncoder)
     left_enc.setDefaultProfilePreset(
@@ -50,6 +60,9 @@ def create_pipeline(fps, left_name, right_name, depth_name, rgb_name):
         fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
     rgb_enc = pipeline.create(dai.node.VideoEncoder)
     rgb_enc.setDefaultProfilePreset(
+        fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
+    disparity_enc = pipeline.create(dai.node.VideoEncoder)
+    disparity_enc.setDefaultProfilePreset(
         fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
 
     # left.out.link(left_enc.input)
@@ -65,11 +78,10 @@ def create_pipeline(fps, left_name, right_name, depth_name, rgb_name):
     left_enc.bitstream.link(left_xout.input)
     right_enc.bitstream.link(right_xout.input)
 
-    depth_xout = pipeline.create(dai.node.XLinkOut)
-    depth_xout.input.setBlocking(False)
-    depth_xout.input.setQueueSize(1)
-    depth_xout.setStreamName(depth_name)
-    stereo.depth.link(depth_xout.input)
+    stereo.disparity.link(disparity_enc.input)
+    disparity_xout = pipeline.create(dai.node.XLinkOut)
+    disparity_xout.setStreamName(disparity_name)
+    disparity_enc.bitstream.link(disparity_xout.input)
 
     rgb.video.link(rgb_enc.input)
     rgb_xout = pipeline.create(dai.node.XLinkOut)
@@ -86,11 +98,11 @@ def create_pipeline(fps, left_name, right_name, depth_name, rgb_name):
     return pipeline
 
 
-def write_thread(in_q, quit_event, filename, width, height, fps):
+def write_thread(in_q, quit_event, filename, width, height, fps, codec):
     '''Grab encoded images from a queue and save to the provided filename'''
     # setup video context
     import av
-    codec = 'h264'
+    # codec = 'h264'
     # codec = 'hevc'
     # codec = 'h264_nvenc'
     output_container = av.open(filename, 'w')
@@ -145,11 +157,11 @@ def write_thread(in_q, quit_event, filename, width, height, fps):
     logging.info('Finished encoding')
 
 
-def decode_thread(decode_q, display_q, quit_event, name):
+def decode_thread(decode_q, display_q, quit_event, name, codec):
     '''Decode images and sent to display queue'''
     logging.info('Starting decode thread {}'.format(name))
     import av
-    codec = av.CodecContext.create('h264', 'r')
+    codec = av.CodecContext.create(codec, 'r')
     while not quit_event.is_set():
         try:
             data = decode_q.get(timeout=1)
@@ -164,7 +176,7 @@ def decode_thread(decode_q, display_q, quit_event, name):
             pass
 
 
-def capture_thread(device_q, write_q, decode_q, quit_event, name):
+def capture_thread(device_q, write_q, decode_q, quit_event, decode_event, name):
     '''Capture images from camera and add to the queue'''
 
     logging.info('Capture thread started for camera {}'.format(name))
@@ -181,35 +193,42 @@ def capture_thread(device_q, write_q, decode_q, quit_event, name):
         except queue.Full:
             logging.warning('Encoding queue full, dropped frame!')
         try:
-            decode_q.put(data, block=False)
+            if decode_event.is_set():
+                decode_q.put(data, block=False)
         except queue.Full:
-            logging.warning('Display queue full, showing reduced framerate')
+            logging.info('Display queue full, showing reduced framerate')
     logging.info('Capture count for camera {}: {}'.format(name, capture_count))
 
 
-class MonoCameraCapture():
-    def __init__(self, device_q, name, fps, width, height):
+class CameraCapture():
+    def __init__(self, device_q, name, fps, width, height, decodec, encodec):
         self.name = name
         time_format = '%y%m%d_%H%M%S'
         self.filename = '{}-{}.mp4'.format(name, time.strftime(time_format))
         self.fps = fps
         self.width  = width
         self.height = height
+        self.decodec = decodec
+        self.encodec = encodec
         self.write_q = queue.Queue(maxsize=fps*10)
         self.decode_q = queue.Queue(maxsize=1)
         self.display_q = queue.Queue(maxsize=1)
         self.capture_quit = threading.Event()
         self.write_quit = threading.Event()
         self.decode_quit = threading.Event()
+        self.decode_enable = threading.Event()
         self.write_thread = threading.Thread(
             target=write_thread,
-            args=(self.write_q, self.write_quit, self.filename, width, height, fps))
+            args=(self.write_q, self.write_quit, self.filename, width,
+                  height, fps, encodec))
         self.decode_thread = threading.Thread(
             target=decode_thread,
-            args=(self.decode_q, self.display_q, self.decode_quit, name))
+            args=(self.decode_q, self.display_q, self.decode_quit, name,
+                  decodec))
         self.capture_thread = threading.Thread(
             target=capture_thread,
-            args=(device_q, self.write_q, self.decode_q, self.capture_quit, name))
+            args=(device_q, self.write_q, self.decode_q, self.capture_quit,
+                  self.decode_enable, name))
 
     def start_threads(self):
         logging.info('Starting threads for camera {}...'.format(
@@ -224,10 +243,17 @@ class MonoCameraCapture():
         logging.debug('Started threads for camera {}...'.format(
             self.name))
 
-    def start_capture(self):
-        logging.info('Starting capture for camera {}...'.format(
+    def enable_decoding(self):
+        logging.info('Enable frame decoding for camera {}...'.format(
             self.name
         ))
+        self.decode_enable.set()
+
+    def disable_decoding(self):
+        logging.info('Disable frame decoding for camera {}...'.format(
+            self.name
+        ))
+        self.decode_enable.clear()
 
     def stop_threads(self):
         logging.info('Stopping threads for camera {}...'.format(
@@ -243,7 +269,7 @@ class MonoCameraCapture():
 
 if __name__ == '__main__':
     fps = 30
-    height = 720
+    height = 800
     width = 1280
     # codec = 'h264_nvenc'
     log = logging.getLogger()
@@ -260,17 +286,17 @@ if __name__ == '__main__':
     with contextlib.ExitStack() as stack:
         openvino_version = dai.OpenVINO.Version.VERSION_2021_4
         caps = []
+        disp_caps = []
         ordered_devs = [dai.Device.getDeviceByMxId('18443010C1A4631200'),
                         dai.Device.getDeviceByMxId('194430106195F41200')]
         # ordered_devs = [dai.Device.getDeviceByMxId('18443010C1A4631200')]
-        stream_names = [['box1', 'box2', 'depth1', 'color1'],
-                        ['box4', 'box3', 'depth2', 'color2']]
+        stream_names = [['b1l', 'b1r', 'b1c', 'b1d']]
         # stream_names = [['box1', 'box2']]
         for dev, sn in zip(device_infos, stream_names):
             time.sleep(1) # Currently required due to XLink race issues
             device: dai.Device = stack.enter_context(
                 dai.Device(openvino_version, dev, False))
-            device.setIrLaserDotProjectorBrightness(100)
+            # device.setIrLaserDotProjectorBrightness(100)
             device.setIrFloodLightBrightness(50)
             device.startPipeline(create_pipeline(fps, *sn))
 
@@ -284,19 +310,30 @@ if __name__ == '__main__':
             logging.warning(device.getOutputQueueNames())
             left_q = device.getOutputQueue(sn[0], maxSize=fps, blocking=True)
             right_q = device.getOutputQueue(sn[1], maxSize=fps, blocking=True)
-            left = MonoCameraCapture(left_q, sn[0], fps, width, height)
-            right = MonoCameraCapture(right_q, sn[1], fps, width, height)
+            color_q = device.getOutputQueue(sn[2], maxSize=fps, blocking=True)
+            disparity_q = device.getOutputQueue(sn[3], maxSize=fps, blocking=True)
+            left = CameraCapture(left_q, sn[0], fps, width, height, 'h264', 'h264')
+            right = CameraCapture(right_q, sn[1], fps, width, height, 'h264', 'h264')
+            color = CameraCapture(color_q, sn[2], fps, width, height, 'h264', 'h264')
+            disparity = CameraCapture(disparity_q, sn[3], fps, width, height, 'h264', 'h264')
+            left.disable_decoding()
+            right.disable_decoding()
+            color.enable_decoding()
+            disparity.enable_decoding()
             left.start_threads()
             right.start_threads()
-            caps.append([left, right])
+            color.start_threads()
+            disparity.start_threads()
+            caps.append([left, right, color, disparity])
+            disp_caps.append([color, disparity])
 
         try:
             images = [[np.zeros((int(height/2), int(width/2), 3))
-                       for i in range(2)]
-                      for i in range(len(caps))]
+                       for i in range(len(disp_caps[0]))]
+                      for i in range(len(disp_caps))]
             while True:
                 changed = False
-                for i, cap_row in enumerate(caps):
+                for i, cap_row in enumerate(disp_caps):
                     for j, cap in enumerate(cap_row):
                         try:
                             images[i][j] = cap.display_q.get(timeout=0.001)
