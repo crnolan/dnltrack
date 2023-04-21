@@ -23,24 +23,24 @@ if __name__ == '__main__':
 def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     pipeline = dai.Pipeline()
 
-    stereo = pipeline.create(dai.node.StereoDepth)
-    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
-    stereo.setExtendedDisparity(True)
-    stereo.setLeftRightCheck(False)
-    stereo.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_5x5)
+    # stereo = pipeline.create(dai.node.StereoDepth)
+    # stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
+    # stereo.setExtendedDisparity(True)
+    # stereo.setLeftRightCheck(False)
+    # stereo.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_5x5)
     
     # Calculate minZ and maxZ based on FOV and baseline
     # DFOV / HFOV / VFOV: 150°/128°/80°
     # Resolution: 1280x800
     # min_distance = focal_length_in_pixels * base_line_dist / max_disparity_in_pixels
     # focal_length_in_pixels = 1280 * 0.5 / tan(71.9 * 0.5 * PI / 180)
-    stereo.initialConfig.setDisparityShift(60)
+    # stereo.initialConfig.setDisparityShift(60)
 
     left = pipeline.create(dai.node.MonoCamera)
     left.setBoardSocket(dai.CameraBoardSocket.LEFT)
     left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     left.setFps(fps)
-    # left.initialControl.setStopStreaming()
+    left.initialControl.setStopStreaming()
     right = pipeline.create(dai.node.MonoCamera)
     right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
     right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
@@ -52,7 +52,7 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
     # rgb.setVideoSize(640, 360)
     rgb.setFps(fps)
-    # rgb.initialControl.setStopStreaming()
+    rgb.initialControl.setStopStreaming()
 
     left_enc = pipeline.create(dai.node.VideoEncoder)
     left_enc.setDefaultProfilePreset(
@@ -63,14 +63,14 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     rgb_enc = pipeline.create(dai.node.VideoEncoder)
     rgb_enc.setDefaultProfilePreset(
         fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
-    disparity_enc = pipeline.create(dai.node.VideoEncoder)
-    disparity_enc.setDefaultProfilePreset(
-        fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
+    # disparity_enc = pipeline.create(dai.node.VideoEncoder)
+    # disparity_enc.setDefaultProfilePreset(
+    #     fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
 
     # left.out.link(left_enc.input)
     # right.out.link(right_enc.input)
-    left.out.link(stereo.left)
-    right.out.link(stereo.right)
+    # left.out.link(stereo.left)
+    # right.out.link(stereo.right)
     left.out.link(left_enc.input)
     right.out.link(right_enc.input)
     # stereo.rectifiedLeft.link(left_enc.input)
@@ -82,10 +82,10 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     left_enc.bitstream.link(left_xout.input)
     right_enc.bitstream.link(right_xout.input)
 
-    stereo.disparity.link(disparity_enc.input)
-    disparity_xout = pipeline.create(dai.node.XLinkOut)
-    disparity_xout.setStreamName(disparity_name)
-    disparity_enc.bitstream.link(disparity_xout.input)
+    # stereo.disparity.link(disparity_enc.input)
+    # disparity_xout = pipeline.create(dai.node.XLinkOut)
+    # disparity_xout.setStreamName(disparity_name)
+    # disparity_enc.bitstream.link(disparity_xout.input)
 
     rgb.video.link(rgb_enc.input)
     rgb_xout = pipeline.create(dai.node.XLinkOut)
@@ -95,12 +95,10 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     rgb_enc.bitstream.link(rgb_xout.input)
 
     # Camera control queue
-    left_ctrl = pipeline.createXLinkIn()
-    left_ctrl.setStreamName(left_name + '_ctrl')
-    left_ctrl.out.link(left.inputControl)
-    right_ctrl = pipeline.createXLinkIn()
-    right_ctrl.setStreamName(right_name + '_ctrl')
-    right_ctrl.out.link(right.inputControl)
+    mono_ctrl = pipeline.createXLinkIn()
+    mono_ctrl.setStreamName(left_name + '_ctrl')
+    mono_ctrl.out.link(left.inputControl)
+    mono_ctrl.out.link(right.inputControl)
     rgb_ctrl = pipeline.createXLinkIn()
     rgb_ctrl.setStreamName(rgb_name + '_ctrl')
     rgb_ctrl.out.link(rgb.inputControl)
@@ -193,7 +191,11 @@ def capture_thread(device_q, write_q, decode_q, quit_event, decode_event, name):
     capture_count = 0
     # t0 = int(time.time_ns())
     while not quit_event.is_set():
-        data = device_q.get().getData()
+        message = device_q.tryGet()
+        if message is None:
+            time.sleep(0.001)
+            continue
+        data = message.getData()
         # ts = int(time.time_ns()) - t0
         capture_count += 1
         try:
@@ -293,8 +295,7 @@ if __name__ == '__main__':
     device_infos_dict = {}
     devices = []
     rgb_control_qs = []
-    left_control_qs = []
-    right_control_qs = []
+    mono_control_qs = []
     print(f'Found {len(device_infos)} devices')
     print([dev.name for dev in device_infos])
     
@@ -314,7 +315,7 @@ if __name__ == '__main__':
         
         for name, dev in sorted(device_infos_dict.items()):
             sn = [name + s for s in ['_left', '_right', '_rgb', '_depth']]
-            time.sleep(1) # Currently required due to XLink race issues
+            time.sleep(0.1) # Currently required due to XLink race issues
             device: dai.Device = stack.enter_context(
                 dai.Device(openvino_version, dev, False))
             devices.append(device)
@@ -323,40 +324,32 @@ if __name__ == '__main__':
             device.startPipeline(create_pipeline(fps, *sn))
 
             rgb_control_qs.append(device.getInputQueue(sn[2] + '_ctrl'))
-            left_control_qs.append(device.getInputQueue(sn[0] + '_ctrl'))
-            right_control_qs.append(device.getInputQueue(sn[1] + '_ctrl'))
+            mono_control_qs.append(device.getInputQueue(sn[0] + '_ctrl'))
 
             logging.warning(device.getOutputQueueNames())
             left_q = device.getOutputQueue(sn[0], maxSize=fps, blocking=True)
             right_q = device.getOutputQueue(sn[1], maxSize=fps, blocking=True)
             color_q = device.getOutputQueue(sn[2], maxSize=fps, blocking=True)
-            disparity_q = device.getOutputQueue(sn[3], maxSize=fps, blocking=True)
+            # disparity_q = device.getOutputQueue(sn[3], maxSize=fps, blocking=True)
             left = CameraCapture(left_q, sn[0], fps, width, height, 'h264', 'h264')
             right = CameraCapture(right_q, sn[1], fps, width, height, 'h264', 'h264')
             color = CameraCapture(color_q, sn[2], fps, width, height, 'h264', 'h264')
-            disparity = CameraCapture(disparity_q, sn[3], fps, width, height, 'h264', 'h264')
-            left.disable_decoding()
-            right.disable_decoding()
+            # disparity = CameraCapture(disparity_q, sn[3], fps, width, height, 'h264', 'h264')
+            left.enable_decoding()
+            right.enable_decoding()
             color.enable_decoding()
-            disparity.enable_decoding()
+            # disparity.enable_decoding()
             left.start_threads()
             right.start_threads()
-            disparity.start_threads()
+            # disparity.start_threads()
             color.start_threads()
-            caps.append([color, disparity, right, left])
-            disp_caps.append([color, disparity])
-
-        # for q in rgb_control_qs:
+            # caps.append([color, disparity, right, left])
+            # disp_caps.append([color, disparity])
+            caps.append([color, right, left])
+            disp_caps.append([color, left, right])
+        # for q in mono_control_qs:
         #     ctrl = dai.CameraControl()
-        #     ctrl.setStartStreaming()
-        #     q.send(ctrl)
-        # for q in right_control_qs:
-        #     ctrl = dai.CameraControl()
-        #     ctrl.setStartStreaming()
-        #     q.send(ctrl)
-        # for q in left_control_qs:
-        #     ctrl = dai.CameraControl()
-        #     ctrl.setStartStreaming()
+        #     ctrl.setStopStreaming()
         #     q.send(ctrl)
 
         try:
@@ -377,6 +370,16 @@ if __name__ == '__main__':
                         ctrl = dai.CameraControl()
                         ctrl.setAutoWhiteBalanceLock(False)
                         q.send(ctrl)
+                elif key == ord('s'):
+                    for q in rgb_control_qs:
+                        ctrl = dai.CameraControl()
+                        ctrl.setStartStreaming()
+                        q.send(ctrl)
+                    for q in mono_control_qs:
+                        ctrl = dai.CameraControl()
+                        ctrl.setStartStreaming()
+                        q.send(ctrl)
+
                 changed = False
                 for i, cap_row in enumerate(disp_caps):
                     for j, cap in enumerate(cap_row):
@@ -400,18 +403,14 @@ if __name__ == '__main__':
             #             pass
             cv2.destroyAllWindows()
 
-        # for q in left_control_qs:
-        #     ctrl = dai.CameraControl()
-        #     ctrl.setStopStreaming()
-        #     q.send(ctrl)
-        # for q in right_control_qs:
-        #     ctrl = dai.CameraControl()
-        #     ctrl.setStopStreaming()
-        #     q.send(ctrl)
-        # for q in rgb_control_qs:
-        #     ctrl = dai.CameraControl()
-        #     ctrl.setStopStreaming()
-        #     q.send(ctrl)
+        for q in mono_control_qs:
+            ctrl = dai.CameraControl()
+            ctrl.setStopStreaming()
+            q.send(ctrl)
+        for q in rgb_control_qs:
+            ctrl = dai.CameraControl()
+            ctrl.setStopStreaming()
+            q.send(ctrl)
 
         for cap_row in caps:
             for cap in cap_row:
