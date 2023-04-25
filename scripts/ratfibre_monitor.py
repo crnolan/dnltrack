@@ -40,7 +40,7 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     left.setBoardSocket(dai.CameraBoardSocket.LEFT)
     left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     left.setFps(fps)
-    left.initialControl.setStopStreaming()
+    # left.initialControl.setStopStreaming()
     right = pipeline.create(dai.node.MonoCamera)
     right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
     right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
@@ -52,7 +52,7 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
     # rgb.setVideoSize(640, 360)
     rgb.setFps(fps)
-    rgb.initialControl.setStopStreaming()
+    # rgb.initialControl.setStopStreaming()
 
     left_enc = pipeline.create(dai.node.VideoEncoder)
     left_enc.setDefaultProfilePreset(
@@ -379,7 +379,11 @@ if __name__ == '__main__':
                         ctrl = dai.CameraControl()
                         ctrl.setStartStreaming()
                         q.send(ctrl)
-
+                elif key == ord('e'):
+                    for q in rgb_control_qs:
+                        ctrl = dai.CameraControl()
+                        ctrl.setManualExposure(exposureTimeUs=20000, sensitivityIso=1600)
+                        q.send(ctrl)
                 changed = False
                 for i, cap_row in enumerate(disp_caps):
                     for j, cap in enumerate(cap_row):
