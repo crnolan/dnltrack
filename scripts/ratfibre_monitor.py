@@ -37,18 +37,18 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     # stereo.initialConfig.setDisparityShift(60)
 
     left = pipeline.create(dai.node.MonoCamera)
-    left.setBoardSocket(dai.CameraBoardSocket.LEFT)
+    left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     left.setFps(fps)
     # left.initialControl.setStopStreaming()
     right = pipeline.create(dai.node.MonoCamera)
-    right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
+    right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
     right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     right.setFps(fps)
     # right.initialControl.setStopStreaming()
 
     rgb = pipeline.create(dai.node.ColorCamera)
-    rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
+    rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
     rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
     # rgb.setVideoSize(640, 360)
     rgb.setFps(fps)
@@ -285,7 +285,8 @@ class CameraCapture():
 
 def connect_thread(connect_q, device_info):
     logging.info(f'Connecting to {device_info.name}...')
-    device = dai.Device(openvino_version, device_info, False)
+    device = dai.Device(device_info)
+    logging.info(f'Connected to {device_info.name}...')
     connect_q.put(device)
 
 
@@ -310,26 +311,35 @@ if __name__ == '__main__':
     print([dev.name for dev in device_infos])
 
     try:
-        openvino_version = dai.OpenVINO.Version.VERSION_2021_4
+        # openvino_version = dai.OpenVINO.Version.VERSION_2021_4
         caps = []
         disp_caps = []
 
         connect_q = queue.Queue(maxsize=len(device_infos))
         connect_threads = []
+        # for device_info in device_infos:
+        #     logging.debug(f'Starting connect thread for {device_info}...')
+        #     ct = threading.Thread(target=connect_thread,
+        #                           args=(connect_q, device_info))
+        #     ct.start()
+        #     connect_threads.append(ct)
+
+        # key = None
+        # while (((n := sum([t.is_alive() for t in connect_threads])) > 0) and
+        #        (key != ord('q'))):
+        #     logging.info(f'Waiting for {n} cameras to start (q to stop)...')
+        #     time.sleep(1)
+        #     key = cv2.waitKey(1)
+        # logging.info(f'Connected to {connect_q.qsize()} cameras')
+        # key = None
+
+        # while (not connect_q.empty()):
+        #     devices.append(connect_q.get())
+
         for device_info in device_infos:
-            logging.info(f'Starting connect thread for {device_info}...')
-            ct = threading.Thread(target=connect_thread,
-                                  args=(connect_q, device_info))
-            ct.start()
-            connect_threads.append(ct)
-
-        while (n := sum([t.is_alive() for t in connect_threads])) > 0:
-            logging.info(f'Waiting for {n} cameras to start...')
-            time.sleep(1)
-        logging.info(connect_q.qsize())
-
-        while (not connect_q.empty()):
-            devices.append(connect_q.get())
+            logging.info(f'Connecting to {device_info}...')
+            device = dai.Device(device_info)
+            devices.append(device)
 
         for device in devices:
             # name = device_names[dev.name]
@@ -350,7 +360,7 @@ if __name__ == '__main__':
             rgb_control_qs.append(device.getInputQueue(sn[2] + '_ctrl'))
             mono_control_qs.append(device.getInputQueue(sn[0] + '_ctrl'))
 
-            logging.warning(device.getOutputQueueNames())
+            logging.info(device.getOutputQueueNames())
             left_q = device.getOutputQueue(sn[0], maxSize=fps, blocking=True)
             right_q = device.getOutputQueue(sn[1], maxSize=fps, blocking=True)
             color_q = device.getOutputQueue(sn[2], maxSize=fps, blocking=True)
@@ -359,8 +369,8 @@ if __name__ == '__main__':
             right = CameraCapture(right_q, sn[1], fps, width, height, 'h264', 'h264')
             color = CameraCapture(color_q, sn[2], fps, width, height, 'h264', 'h264')
             # disparity = CameraCapture(disparity_q, sn[3], fps, width, height, 'h264', 'h264')
-            left.enable_decoding()
-            right.enable_decoding()
+            # left.enable_decoding()
+            # right.enable_decoding()
             color.enable_decoding()
             # disparity.enable_decoding()
             left.start_threads()
@@ -370,16 +380,15 @@ if __name__ == '__main__':
             # caps.append([color, disparity, right, left])
             # disp_caps.append([color, disparity])
             caps.append([color, right, left])
-            disp_caps.append([color, left, right])
+            disp_caps.append(color)
         # for q in mono_control_qs:
         #     ctrl = dai.CameraControl()
         #     ctrl.setStopStreaming()
         #     q.send(ctrl)
-
         try:
             images = [[np.zeros((int(height/4), int(width/4), 3))
-                       for i in range(len(disp_caps[0]))]
-                      for i in range(len(disp_caps))]
+                       for i in range(4)]
+                      for i in range(2)]
             key = None
             while True:
                 if key == ord('q'):
@@ -409,13 +418,14 @@ if __name__ == '__main__':
                         ctrl.setManualExposure(exposureTimeUs=20000, sensitivityIso=1600)
                         q.send(ctrl)
                 changed = False
-                for i, cap_row in enumerate(disp_caps):
-                    for j, cap in enumerate(cap_row):
-                        try:
-                            images[i][j] = cap.display_q.get(timeout=0.001)
-                            changed = True
-                        except queue.Empty:
-                            pass
+                for i, cap in enumerate(disp_caps):
+                    try:
+                        # logging.info(f'Images size: {len(images), len(images[0])}')
+                        # logging.info(f'i == {i}, i / 4 == {int(i / 4)}, i % 4 == {i % 4}')
+                        images[int(i / 4)][i % 4] = cap.display_q.get(timeout=0.001)
+                        changed = True
+                    except queue.Empty:
+                        pass
                 if changed:
                     # print('Image sizes: {}x{}x{} and {}x{}x{}'.format(*images[0].shape, *images[1].shape))
                     disp_im = np.concatenate([np.concatenate(imrow, axis=1) for imrow in images])
@@ -430,20 +440,24 @@ if __name__ == '__main__':
             #         except queue.Empty:
             #             pass
             cv2.destroyAllWindows()
+        except Exception as e:
+            logging.error(e)
+        finally:
+            # for q in mono_control_qs:
+            #     ctrl = dai.CameraControl()
+            #     ctrl.setStopStreaming()
+            #     q.send(ctrl)
+            for q in rgb_control_qs:
+                ctrl = dai.CameraControl()
+                ctrl.setStopStreaming()
+                q.send(ctrl)
 
-        for q in mono_control_qs:
-            ctrl = dai.CameraControl()
-            ctrl.setStopStreaming()
-            q.send(ctrl)
-        for q in rgb_control_qs:
-            ctrl = dai.CameraControl()
-            ctrl.setStopStreaming()
-            q.send(ctrl)
+            for cap_row in caps:
+                for cap in cap_row:
+                    cap.stop_threads()
 
-        for cap_row in caps:
-            for cap in cap_row:
-                cap.stop_threads()
-
+    except Exception as e:
+        logging.error(e)
     finally:
         for dev in devices:
             logging.info(f'Closing device {dev.getDeviceInfo().name}...')
