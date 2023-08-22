@@ -28,7 +28,7 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     # stereo.setExtendedDisparity(True)
     # stereo.setLeftRightCheck(False)
     # stereo.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_5x5)
-    
+
     # Calculate minZ and maxZ based on FOV and baseline
     # DFOV / HFOV / VFOV: 150°/128°/80°
     # Resolution: 1280x800
@@ -122,7 +122,7 @@ def write_thread(in_q, quit_event, filename, width, height, fps, codec):
     nbytes = 0
     stream.width = width
     stream.height = height
-    logging.info('Start writing')
+    logging.debug('Start writing')
     write_count = 0
     while not quit_event.is_set():
         try:
@@ -139,12 +139,12 @@ def write_thread(in_q, quit_event, filename, width, height, fps, codec):
             write_count += 1
         except queue.Empty:
             pass
-    
-    logging.info('Clean up writing')
+
+    logging.debug('Clean up writing')
 
     # Make sure there are no packets left in the queue
     try:
-        logging.info('Writer looking for remaining data...')
+        logging.debug('Writer looking for remaining data...')
         while True:
             data = in_q.get(block=False)
             # ts = int(time.time()*1000*1000) - t0
@@ -162,12 +162,12 @@ def write_thread(in_q, quit_event, filename, width, height, fps, codec):
     logging.info('Packet count: {}'.format(write_count))
     # Close the file
     output_container.close()
-    logging.info('Finished encoding')
+    logging.debug('Finished encoding')
 
 
 def decode_thread(decode_q, display_q, quit_event, name, codec):
     '''Decode images and sent to display queue'''
-    logging.info('Starting decode thread {}'.format(name))
+    logging.debug('Starting decode thread {}'.format(name))
     import av
     codec = av.CodecContext.create(codec, 'r')
     while not quit_event.is_set():
@@ -187,7 +187,7 @@ def decode_thread(decode_q, display_q, quit_event, name, codec):
 def capture_thread(device_q, write_q, decode_q, quit_event, decode_event, name):
     '''Capture images from camera and add to the queue'''
 
-    logging.info('Capture thread started for camera {}'.format(name))
+    logging.debug('Capture thread started for camera {}'.format(name))
     capture_count = 0
     # t0 = int(time.time_ns())
     while not quit_event.is_set():
@@ -208,7 +208,7 @@ def capture_thread(device_q, write_q, decode_q, quit_event, decode_event, name):
             if decode_event.is_set():
                 decode_q.put(data, block=False)
         except queue.Full:
-            logging.info('Display queue full, showing reduced framerate')
+            logging.debug('Display queue full, showing reduced framerate')
     logging.info('Capture count for camera {}: {}'.format(name, capture_count))
 
 
@@ -243,7 +243,7 @@ class CameraCapture():
                   self.decode_enable, name))
 
     def start_threads(self):
-        logging.info('Starting threads for camera {}...'.format(
+        logging.debug('Starting threads for camera {}...'.format(
             self.name))
         self.write_thread.start()
         self.decode_thread.start()
@@ -256,19 +256,19 @@ class CameraCapture():
             self.name))
 
     def enable_decoding(self):
-        logging.info('Enable frame decoding for camera {}...'.format(
+        logging.debug('Enable frame decoding for camera {}...'.format(
             self.name
         ))
         self.decode_enable.set()
 
     def disable_decoding(self):
-        logging.info('Disable frame decoding for camera {}...'.format(
+        logging.debug('Disable frame decoding for camera {}...'.format(
             self.name
         ))
         self.decode_enable.clear()
 
     def stop_threads(self):
-        logging.info('Stopping threads for camera {}...'.format(
+        logging.debug('Stopping threads for camera {}...'.format(
             self.name))
         self.capture_quit.set()
         while self.capture_thread.is_alive():
@@ -276,8 +276,15 @@ class CameraCapture():
             self.capture_thread.join(timeout=0.1)
         self.decode_quit.set()
         self.write_quit.set()
-        logging.info('Stopped threads for camera {}...'.format(
+        logging.debug('Stopped threads for camera {}...'.format(
             self.name))
+
+
+def connect_thread(connect_q, device_info):
+    logging.info(f'Connecting to {device_info.name}...')
+    device = dai.Device(openvino_version, device_info, False)
+    connect_q.put(device)
+
 
 if __name__ == '__main__':
     fps = 30
@@ -292,33 +299,47 @@ if __name__ == '__main__':
     log.addHandler(console_handler)
 
     device_infos = dai.Device.getAllAvailableDevices()
-    device_infos_dict = {}
+    devices_dict = {}
     devices = []
     rgb_control_qs = []
     mono_control_qs = []
     print(f'Found {len(device_infos)} devices')
     print([dev.name for dev in device_infos])
-    
-    with contextlib.ExitStack() as stack:
+
+    try:
         openvino_version = dai.OpenVINO.Version.VERSION_2021_4
         caps = []
         disp_caps = []
 
-        for dev in device_infos:
+        connect_q = queue.Queue(maxsize=len(device_infos))
+        connect_threads = []
+        for device_info in device_infos:
+            logging.info(f'Starting connect thread for {device_info}...')
+            ct = threading.Thread(target=connect_thread,
+                                  args=(connect_q, device_info))
+            ct.start()
+            connect_threads.append(ct)
+
+        while (n := sum([t.is_alive() for t in connect_threads])) > 0:
+            logging.info(f'Waiting for {n} cameras to start...')
+            time.sleep(1)
+        logging.info(connect_q.qsize())
+
+        while (not connect_q.empty()):
+            devices.append(connect_q.get())
+
+        for device in devices:
             # name = device_names[dev.name]
-            address = dev.name.split('.')
+            address = device.getDeviceInfo().name.split('.')
             if len(address) == 4:
                 name = 'box' + address[3]
             else:
-                name = dev.name
-            device_infos_dict[name] = dev
-        
-        for name, dev in sorted(device_infos_dict.items()):
+                name = device.name
+            devices_dict[name] = device
+
+        for name, device in sorted(devices_dict.items()):
+            logging.info(f'Starting device {name}...')
             sn = [name + s for s in ['_left', '_right', '_rgb', '_depth']]
-            time.sleep(0.1) # Currently required due to XLink race issues
-            device: dai.Device = stack.enter_context(
-                dai.Device(openvino_version, dev, False))
-            devices.append(device)
             # device.setIrLaserDotProjectorBrightness(100) # 0-1200
             device.setIrFloodLightBrightness(1000) # 0-1500
             device.startPipeline(create_pipeline(fps, *sn))
@@ -420,4 +441,7 @@ if __name__ == '__main__':
             for cap in cap_row:
                 cap.stop_threads()
 
+    finally:
+        for dev in devices:
+            dev.close()
     logging.info('Exiting...')
