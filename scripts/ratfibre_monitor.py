@@ -271,11 +271,14 @@ class CameraCapture():
         logging.debug('Stopping threads for camera {}...'.format(
             self.name))
         self.capture_quit.set()
-        while self.capture_thread.is_alive():
-            logging.info('Waiting for capture thread to exit...')
-            self.capture_thread.join(timeout=0.1)
+        logging.debug('Waiting for capture thread to exit...')
+        self.capture_thread.join()
         self.decode_quit.set()
         self.write_quit.set()
+        logging.debug('Waiting for decode thread to exit...')
+        self.decode_thread.join()
+        logging.debug('Waiting for write thread to exit...')
+        self.write_thread.join()
         logging.debug('Stopped threads for camera {}...'.format(
             self.name))
 
@@ -443,5 +446,6 @@ if __name__ == '__main__':
 
     finally:
         for dev in devices:
+            logging.info(f'Closing device {dev.getDeviceInfo().name}...')
             dev.close()
     logging.info('Exiting...')
