@@ -1,5 +1,6 @@
 import depthai as dai
 from fractions import Fraction
+import math
 import cv2
 import time
 from datetime import datetime
@@ -165,7 +166,7 @@ def write_thread(in_q, quit_event, filename, width, height, fps, codec):
     logging.debug('Finished encoding')
 
 
-def decode_thread(decode_q, display_q, quit_event, name, codec):
+def decode_thread(decode_q, display_q, quit_event, name, codec, scale):
     '''Decode images and sent to display queue'''
     logging.debug('Starting decode thread {}'.format(name))
     import av
@@ -177,7 +178,7 @@ def decode_thread(decode_q, display_q, quit_event, name, codec):
             if len(frames) > 0:
                 image = np.array(frames[0].to_image().convert('RGB'))
                 try:
-                    display_q.put(image[::4, ::4, ::-1], block=False)
+                    display_q.put(image[::scale, ::scale, ::-1], block=False)
                 except queue.Full:
                     logging.debug('Display queue full for {}'.format(name))
         except queue.Empty:
@@ -213,7 +214,8 @@ def capture_thread(device_q, write_q, decode_q, quit_event, decode_event, name):
 
 
 class CameraCapture():
-    def __init__(self, device_q, name, fps, width, height, decodec, encodec):
+    def __init__(self, device_q, name, fps, width, height, decodec, encodec,
+                 scale):
         self.name = name
         time_format = '%y%m%d_%H%M%S'
         self.filename = '{}-{}.mp4'.format(name, time.strftime(time_format))
@@ -236,7 +238,7 @@ class CameraCapture():
         self.decode_thread = threading.Thread(
             target=decode_thread,
             args=(self.decode_q, self.display_q, self.decode_quit, name,
-                  decodec))
+                  decodec, scale))
         self.capture_thread = threading.Thread(
             target=capture_thread,
             args=(device_q, self.write_q, self.decode_q, self.capture_quit,
@@ -307,16 +309,16 @@ if __name__ == '__main__':
     devices = []
     rgb_control_qs = []
     mono_control_qs = []
-    print(f'Found {len(device_infos)} devices')
-    print([dev.name for dev in device_infos])
+    logging.info(f'Found {len(device_infos)} devices')
+    logging.info([dev.name for dev in device_infos])
 
     try:
         # openvino_version = dai.OpenVINO.Version.VERSION_2021_4
         caps = []
         disp_caps = []
 
-        connect_q = queue.Queue(maxsize=len(device_infos))
-        connect_threads = []
+        # connect_q = queue.Queue(maxsize=len(device_infos))
+        # connect_threads = []
         # for device_info in device_infos:
         #     logging.debug(f'Starting connect thread for {device_info}...')
         #     ct = threading.Thread(target=connect_thread,
@@ -340,6 +342,15 @@ if __name__ == '__main__':
             logging.info(f'Connecting to {device_info}...')
             device = dai.Device(device_info)
             devices.append(device)
+
+        grid_w = min(4, len(devices))
+        grid_h = int(np.ceil(len(devices) / grid_w))
+        scale = max(1, math.ceil(math.log2(max(grid_h, grid_w)))**2)
+        images = [np.zeros((int(height/scale), int(width/scale), 3))
+                    for i in range(grid_w * grid_h)]
+        image_grid = np.arange(grid_w * grid_h)
+        image_grid[len(devices):] = -1
+        image_grid = image_grid.reshape((grid_h, grid_w))
 
         for device in devices:
             # name = device_names[dev.name]
@@ -365,9 +376,12 @@ if __name__ == '__main__':
             right_q = device.getOutputQueue(sn[1], maxSize=fps, blocking=True)
             color_q = device.getOutputQueue(sn[2], maxSize=fps, blocking=True)
             # disparity_q = device.getOutputQueue(sn[3], maxSize=fps, blocking=True)
-            left = CameraCapture(left_q, sn[0], fps, width, height, 'h264', 'h264')
-            right = CameraCapture(right_q, sn[1], fps, width, height, 'h264', 'h264')
-            color = CameraCapture(color_q, sn[2], fps, width, height, 'h264', 'h264')
+            left = CameraCapture(left_q, sn[0], fps, width, height,
+                                 'h264', 'h264', scale)
+            right = CameraCapture(right_q, sn[1], fps, width, height,
+                                  'h264', 'h264', scale)
+            color = CameraCapture(color_q, sn[2], fps, width, height,
+                                  'h264', 'h264', scale)
             # disparity = CameraCapture(disparity_q, sn[3], fps, width, height, 'h264', 'h264')
             # left.enable_decoding()
             # right.enable_decoding()
@@ -386,9 +400,10 @@ if __name__ == '__main__':
         #     ctrl.setStopStreaming()
         #     q.send(ctrl)
         try:
-            images = [[np.zeros((int(height/4), int(width/4), 3))
-                       for i in range(4)]
-                      for i in range(2)]
+            # images = [[np.zeros((int(height/4), int(width/4), 3))
+            #            for i in range(4)]
+            #           for i in range(2)]
+
             key = None
             while True:
                 if key == ord('q'):
@@ -422,13 +437,16 @@ if __name__ == '__main__':
                     try:
                         # logging.info(f'Images size: {len(images), len(images[0])}')
                         # logging.info(f'i == {i}, i / 4 == {int(i / 4)}, i % 4 == {i % 4}')
-                        images[int(i / 4)][i % 4] = cap.display_q.get(timeout=0.001)
+                        # images[int(i / 4)][i % 4] = cap.display_q.get(timeout=0.001)
+                        images[i] = cap.display_q.get(timeout=0.001)
                         changed = True
                     except queue.Empty:
                         pass
                 if changed:
                     # print('Image sizes: {}x{}x{} and {}x{}x{}'.format(*images[0].shape, *images[1].shape))
-                    disp_im = np.concatenate([np.concatenate(imrow, axis=1) for imrow in images])
+                    # disp_im = np.concatenate([np.concatenate(imrow, axis=1) for imrow in images])
+                    disp_im = np.concatenate([np.concatenate([images[i] for i in row], axis=1)
+                                              for row in image_grid], axis=0)
                     cv2.imshow('RodentVision', disp_im)
                 key = cv2.waitKey(1)
         except KeyboardInterrupt:
