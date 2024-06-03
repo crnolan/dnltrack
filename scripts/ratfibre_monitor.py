@@ -1,4 +1,5 @@
 import depthai as dai
+import yaml
 from fractions import Fraction
 import math
 import cv2
@@ -41,19 +42,21 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     left.setFps(fps)
-    # left.initialControl.setStopStreaming()
+    left.initialControl.setStopStreaming()
+    # left.initialControl.setStrobeDisable(True)
+    # left.initialControl.setStrobeSensor(0)
     right = pipeline.create(dai.node.MonoCamera)
     right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
     right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     right.setFps(fps)
-    # right.initialControl.setStopStreaming()
+    right.initialControl.setStopStreaming()
 
     rgb = pipeline.create(dai.node.ColorCamera)
     rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
     rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
     # rgb.setVideoSize(640, 360)
     rgb.setFps(fps)
-    # rgb.initialControl.setStopStreaming()
+    rgb.initialControl.setStopStreaming()
 
     left_enc = pipeline.create(dai.node.VideoEncoder)
     left_enc.setDefaultProfilePreset(
@@ -285,11 +288,11 @@ class CameraCapture():
             self.name))
 
 
-def connect_thread(connect_q, device_info):
+def connect_thread(group, camera, connect_q, device_info):
     logging.info(f'Connecting to {device_info.name}...')
     device = dai.Device(device_info)
     logging.info(f'Connected to {device_info.name}...')
-    connect_q.put(device)
+    connect_q.put((group, camera, device))
 
 
 if __name__ == '__main__':
@@ -312,10 +315,53 @@ if __name__ == '__main__':
     logging.info(f'Found {len(device_infos)} devices')
     logging.info([dev.name for dev in device_infos])
 
+    if len(sys.argv) > 1:
+        config_fn = sys.argv[1]
+    else:
+        config_fn = 'config.yaml'
+    # If there is a config file, load it
+    with open(config_fn, 'r') as f:
+        config = yaml.safe_load(f)
+
+    if 'groups' not in config:
+        logging.error('No camera groups found in config file')
+        sys.exit(1)
+
+    # for name, cameras in config['groups']:
+    #     for camera, details in cameras:
+    #         details['device_info'] = dai.DeviceInfo(details['ip'])
+    #         details['filename_root'] = f'group-{name}_camera-{camera}'
+
     try:
         # openvino_version = dai.OpenVINO.Version.VERSION_2021_4
         caps = []
         disp_caps = []
+
+        connect_q = queue.Queue(maxsize=len(device_infos))
+        connect_threads = []
+
+        for name, cameras in config['groups'].items():
+            for camera, details in cameras.items():
+                # logging.info(f'Connecting to IP {details['ip']} for '
+                #                 f'group {name} and camera {camera}...')
+                # details['device'] = dai.Device(details['device_info'])
+                # devices.append(details['device'])
+                # Find the camera in the list of available devices
+                device_info = None
+                for di in device_infos:
+                    if di.name == details['ip']:
+                        device_info = di
+                        break
+                if device_info is None:
+                    raise ValueError(f'Could not find device with IP {details["ip"]}')
+
+                details['device_info'] = device_info
+                details['filename_root'] = f'group-{name}_camera-{camera}'
+                logging.debug(f'Starting connect thread for {details["device_info"]}...')
+                ct = threading.Thread(target=connect_thread,
+                                      args=(name, camera, connect_q, details['device_info']))
+                ct.start()
+                connect_threads.append(ct)
 
         # connect_q = queue.Queue(maxsize=len(device_infos))
         # connect_threads = []
@@ -326,22 +372,27 @@ if __name__ == '__main__':
         #     ct.start()
         #     connect_threads.append(ct)
 
-        # key = None
-        # while (((n := sum([t.is_alive() for t in connect_threads])) > 0) and
-        #        (key != ord('q'))):
-        #     logging.info(f'Waiting for {n} cameras to start (q to stop)...')
-        #     time.sleep(1)
-        #     key = cv2.waitKey(1)
-        # logging.info(f'Connected to {connect_q.qsize()} cameras')
-        # key = None
+        key = None
+        while (((n := sum([t.is_alive() for t in connect_threads])) > 0) and
+               (key != ord('q'))):
+            logging.info(f'Waiting for {n} cameras to start (q to stop)...')
+            time.sleep(1)
+            key = cv2.waitKey(1)
+        logging.info(f'Connected to {connect_q.qsize()} cameras')
+        key = None
 
-        # while (not connect_q.empty()):
-        #     devices.append(connect_q.get())
-
-        for device_info in device_infos:
-            logging.info(f'Connecting to {device_info}...')
-            device = dai.Device(device_info)
+        while (not connect_q.empty()):
+            group, camera, device = connect_q.get_nowait()
+            logging.info(f'Assigning device to group {group} camera {camera}')
+            config['groups'][group][camera]['device'] = device
             devices.append(device)
+            devices_dict[config['groups'][group][camera]['filename_root']] = device
+            logging.info(f'Assigned device to group {group} camera {camera}')
+
+        # for device_info in device_infos:
+        #     logging.info(f'Connecting to {device_info}...')
+        #     device = dai.Device(device_info)
+        #     devices.append(device)
 
         grid_w = min(4, len(devices))
         grid_h = int(np.ceil(len(devices) / grid_w))
@@ -352,20 +403,20 @@ if __name__ == '__main__':
         image_grid[len(devices):] = -1
         image_grid = image_grid.reshape((grid_h, grid_w))
 
-        for device in devices:
-            # name = device_names[dev.name]
-            address = device.getDeviceInfo().name.split('.')
-            if len(address) == 4:
-                name = 'box' + address[3]
-            else:
-                name = device.name
-            devices_dict[name] = device
+        # for device in devices:
+        #     # name = device_names[dev.name]
+        #     address = device.getDeviceInfo().name.split('.')
+        #     if len(address) == 4:
+        #         name = 'box' + address[3]
+        #     else:
+        #         name = device.name
+        #     devices_dict[name] = device
 
         for name, device in sorted(devices_dict.items()):
             logging.info(f'Starting device {name}...')
             sn = [name + s for s in ['_left', '_right', '_rgb', '_depth']]
             # device.setIrLaserDotProjectorBrightness(100) # 0-1200
-            device.setIrFloodLightBrightness(1000) # 0-1500
+            device.setIrFloodLightIntensity(1000) # 0-1500
             device.startPipeline(create_pipeline(fps, *sn))
 
             rgb_control_qs.append(device.getInputQueue(sn[2] + '_ctrl'))
@@ -461,10 +512,10 @@ if __name__ == '__main__':
         except Exception as e:
             logging.error(e)
         finally:
-            # for q in mono_control_qs:
-            #     ctrl = dai.CameraControl()
-            #     ctrl.setStopStreaming()
-            #     q.send(ctrl)
+            for q in mono_control_qs:
+                ctrl = dai.CameraControl()
+                ctrl.setStopStreaming()
+                q.send(ctrl)
             for q in rgb_control_qs:
                 ctrl = dai.CameraControl()
                 ctrl.setStopStreaming()
@@ -475,7 +526,7 @@ if __name__ == '__main__':
                     cap.stop_threads()
 
     except Exception as e:
-        logging.error(e)
+        logging.exception(e)
     finally:
         for dev in devices:
             logging.info(f'Closing device {dev.getDeviceInfo().name}...')
