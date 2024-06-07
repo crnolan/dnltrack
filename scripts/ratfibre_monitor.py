@@ -42,6 +42,7 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     left.setFps(fps)
+    left.initialControl.setFrameSyncMode(dai.CameraControl.FrameSyncMode.OUTPUT)
     left.initialControl.setStopStreaming()
     # left.initialControl.setStrobeDisable(True)
     # left.initialControl.setStrobeSensor(0)
@@ -49,14 +50,17 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
     right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     right.setFps(fps)
+    right.initialControl.setFrameSyncMode(dai.CameraControl.FrameSyncMode.INPUT)
     right.initialControl.setStopStreaming()
 
-    rgb = pipeline.create(dai.node.ColorCamera)
-    rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
-    rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
-    # rgb.setVideoSize(640, 360)
-    rgb.setFps(fps)
-    rgb.initialControl.setStopStreaming()
+    if rgb_name is not None:
+        rgb = pipeline.create(dai.node.ColorCamera)
+        rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+        rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
+        # rgb.setVideoSize(640, 360)
+        rgb.setFps(fps)
+        rgb.initialControl.setFrameSyncMode(dai.CameraControl.FrameSyncMode.INPUT)
+        rgb.initialControl.setStopStreaming()
 
     left_enc = pipeline.create(dai.node.VideoEncoder)
     left_enc.setDefaultProfilePreset(
@@ -64,9 +68,11 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     right_enc = pipeline.create(dai.node.VideoEncoder)
     right_enc.setDefaultProfilePreset(
         fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
-    rgb_enc = pipeline.create(dai.node.VideoEncoder)
-    rgb_enc.setDefaultProfilePreset(
-        fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
+
+    if rgb_name is not None:
+        rgb_enc = pipeline.create(dai.node.VideoEncoder)
+        rgb_enc.setDefaultProfilePreset(
+            fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
     # disparity_enc = pipeline.create(dai.node.VideoEncoder)
     # disparity_enc.setDefaultProfilePreset(
     #     fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
@@ -91,21 +97,27 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     # disparity_xout.setStreamName(disparity_name)
     # disparity_enc.bitstream.link(disparity_xout.input)
 
-    rgb.video.link(rgb_enc.input)
-    rgb_xout = pipeline.create(dai.node.XLinkOut)
-    rgb_xout.setStreamName(rgb_name)
-    # rgb_xout.input.setBlocking(False)
-    # rgb_xout.input.setQueueSize(1)
-    rgb_enc.bitstream.link(rgb_xout.input)
+    if rgb_name is not None:
+        rgb.video.link(rgb_enc.input)
+        rgb_xout = pipeline.create(dai.node.XLinkOut)
+        rgb_xout.setStreamName(rgb_name)
+        # rgb_xout.input.setBlocking(False)
+        # rgb_xout.input.setQueueSize(1)
+        rgb_enc.bitstream.link(rgb_xout.input)
 
     # Camera control queue
     mono_ctrl = pipeline.createXLinkIn()
     mono_ctrl.setStreamName(left_name + '_ctrl')
-    mono_ctrl.out.link(left.inputControl)
     mono_ctrl.out.link(right.inputControl)
-    rgb_ctrl = pipeline.createXLinkIn()
-    rgb_ctrl.setStreamName(rgb_name + '_ctrl')
-    rgb_ctrl.out.link(rgb.inputControl)
+    mono_ctrl.out.link(left.inputControl)
+    # left_ctrl = pipeline.createXLinkIn()
+    # left_ctrl.setStreamName(left_name + '_soloctrl')
+    # left_ctrl.out.link(left.inputControl)
+
+    if rgb_name is not None:
+        rgb_ctrl = pipeline.createXLinkIn()
+        rgb_ctrl.setStreamName(rgb_name + '_ctrl')
+        rgb_ctrl.out.link(rgb.inputControl)
 
     return pipeline
 
@@ -312,6 +324,7 @@ if __name__ == '__main__':
     devices = []
     rgb_control_qs = []
     mono_control_qs = []
+    left_control_qs = []
     logging.info(f'Found {len(device_infos)} devices')
     logging.info([dev.name for dev in device_infos])
 
@@ -327,11 +340,6 @@ if __name__ == '__main__':
         logging.error('No camera groups found in config file')
         sys.exit(1)
 
-    # for name, cameras in config['groups']:
-    #     for camera, details in cameras:
-    #         details['device_info'] = dai.DeviceInfo(details['ip'])
-    #         details['filename_root'] = f'group-{name}_camera-{camera}'
-
     try:
         # openvino_version = dai.OpenVINO.Version.VERSION_2021_4
         caps = []
@@ -342,10 +350,6 @@ if __name__ == '__main__':
 
         for name, cameras in config['groups'].items():
             for camera, details in cameras.items():
-                # logging.info(f'Connecting to IP {details['ip']} for '
-                #                 f'group {name} and camera {camera}...')
-                # details['device'] = dai.Device(details['device_info'])
-                # devices.append(details['device'])
                 # Find the camera in the list of available devices
                 device_info = None
                 for di in device_infos:
@@ -362,15 +366,6 @@ if __name__ == '__main__':
                                       args=(name, camera, connect_q, details['device_info']))
                 ct.start()
                 connect_threads.append(ct)
-
-        # connect_q = queue.Queue(maxsize=len(device_infos))
-        # connect_threads = []
-        # for device_info in device_infos:
-        #     logging.debug(f'Starting connect thread for {device_info}...')
-        #     ct = threading.Thread(target=connect_thread,
-        #                           args=(connect_q, device_info))
-        #     ct.start()
-        #     connect_threads.append(ct)
 
         key = None
         while (((n := sum([t.is_alive() for t in connect_threads])) > 0) and
@@ -393,14 +388,14 @@ if __name__ == '__main__':
         #     logging.info(f'Connecting to {device_info}...')
         #     device = dai.Device(device_info)
         #     devices.append(device)
-
-        grid_w = min(4, len(devices))
-        grid_h = int(np.ceil(len(devices) / grid_w))
+        n_streams = len(devices) * 3
+        grid_w = min(4, n_streams)
+        grid_h = int(np.ceil(n_streams / grid_w))
         scale = max(1, math.ceil(math.log2(max(grid_h, grid_w)))**2)
         images = [np.zeros((int(height/scale), int(width/scale), 3))
                     for i in range(grid_w * grid_h)]
         image_grid = np.arange(grid_w * grid_h)
-        image_grid[len(devices):] = -1
+        image_grid[n_streams:] = -1
         image_grid = image_grid.reshape((grid_h, grid_w))
 
         # for device in devices:
@@ -415,8 +410,9 @@ if __name__ == '__main__':
         for name, device in sorted(devices_dict.items()):
             logging.info(f'Starting device {name}...')
             sn = [name + s for s in ['_left', '_right', '_rgb', '_depth']]
+            # sn[2] = None
             # device.setIrLaserDotProjectorBrightness(100) # 0-1200
-            device.setIrFloodLightIntensity(1000) # 0-1500
+            device.setIrFloodLightIntensity(100) # 0-1500
             device.startPipeline(create_pipeline(fps, *sn))
 
             rgb_control_qs.append(device.getInputQueue(sn[2] + '_ctrl'))
@@ -434,8 +430,8 @@ if __name__ == '__main__':
             color = CameraCapture(color_q, sn[2], fps, width, height,
                                   'h264', 'h264', scale)
             # disparity = CameraCapture(disparity_q, sn[3], fps, width, height, 'h264', 'h264')
-            # left.enable_decoding()
-            # right.enable_decoding()
+            left.enable_decoding()
+            right.enable_decoding()
             color.enable_decoding()
             # disparity.enable_decoding()
             left.start_threads()
@@ -445,7 +441,10 @@ if __name__ == '__main__':
             # caps.append([color, disparity, right, left])
             # disp_caps.append([color, disparity])
             caps.append([color, right, left])
-            disp_caps.append(color)
+            # caps.append([right, left])
+            # disp_caps.append(color)
+            disp_caps.extend([color, right, left])
+            # disp_caps.extend([right, left])
         # for q in mono_control_qs:
         #     ctrl = dai.CameraControl()
         #     ctrl.setStopStreaming()
@@ -477,6 +476,15 @@ if __name__ == '__main__':
                     for q in mono_control_qs:
                         ctrl = dai.CameraControl()
                         ctrl.setStartStreaming()
+                        q.send(ctrl)
+                elif key == ord('p'):
+                    for q in mono_control_qs:
+                        ctrl = dai.CameraControl()
+                        ctrl.setStopStreaming()
+                        q.send(ctrl)
+                    for q in rgb_control_qs:
+                        ctrl = dai.CameraControl()
+                        ctrl.setStopStreaming()
                         q.send(ctrl)
                 elif key == ord('e'):
                     for q in rgb_control_qs:
