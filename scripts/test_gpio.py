@@ -21,8 +21,12 @@ script.setScript(
     '''
     import GPIO
 
-    MX_PIN = 42
-    ret = GPIO.setup(MX_PIN, GPIO.OUT, GPIO.PULL_DOWN)
+    MX_PIN_SET_VAL = 52 # set value
+    MX_PIN_SET_DIR = 6 # set direction
+
+    GPIO.setup(MX_PIN_SET_DIR, GPIO.OUT, GPIO.PULL_DOWN)
+    GPIO.setup(MX_PIN_SET_VAL, GPIO.OUT, GPIO.PULL_DOWN)
+    GPIO.write(MX_PIN_SET_DIR, True)  # Set direction to output
     toggleVal = True
     node.warn('GPIO toggle: ' + str(toggleVal))
 
@@ -30,7 +34,7 @@ script.setScript(
         data = node.io['in'].get()  # Wait for a message from the host computer
         toggleVal = not toggleVal
         node.warn('GPIO toggle: ' + str(toggleVal))
-        ret = GPIO.write(MX_PIN, toggleVal)  # Toggle the GPIO
+        ret = GPIO.write(MX_PIN_SET_VAL, toggleVal)  # Toggle the GPIO
     '''
 )
 
