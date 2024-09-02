@@ -38,12 +38,46 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     # focal_length_in_pixels = 1280 * 0.5 / tan(71.9 * 0.5 * PI / 180)
     # stereo.initialConfig.setDisparityShift(60)
 
+    script = pipeline.create(dai.node.Script)
+    script.setScript(
+        '''
+        import GPIO
+        import time
+
+        MX_PIN_SET_VAL = 52 # set value
+        MX_PIN_SET_DIR = 6 # set direction
+
+        GPIO.setup(MX_PIN_SET_DIR, GPIO.OUT, GPIO.PULL_DOWN)
+        GPIO.setup(MX_PIN_SET_VAL, GPIO.OUT, GPIO.PULL_DOWN)
+        GPIO.write(MX_PIN_SET_DIR, True)  # Set direction to output
+        recordFrames = 0
+        record = False
+
+        while (True):
+            toggle = node.io['recordtog'].tryGet()  # Wait for a message from the host computer
+            if toggle is not None:
+                record = not record
+                node.warn('Record toggle: ' + str(record))
+            frame = node.io['frameIn'].get()
+            if record:
+                node.io['frameOut'].send(frame)
+                recordFrames += 1
+                ret = GPIO.write(MX_PIN_SET_VAL, True)  # Toggle the GPIO
+                if recordFrames % 10 == 0:
+                    node.warn('Frames captured: ' + str(recordFrames))
+            time.sleep(0.005)
+        '''
+    )
+    recordtog_xin = pipeline.create(dai.node.XLinkIn)
+    recordtog_xin.setStreamName('recordtog')
+    recordtog_xin.out.link(script.inputs['recordtog'])
+
     left = pipeline.create(dai.node.MonoCamera)
     left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     left.setFps(fps)
     left.initialControl.setFrameSyncMode(dai.CameraControl.FrameSyncMode.OUTPUT)
-    left.initialControl.setStopStreaming()
+    # left.initialControl.setStopStreaming()
     # left.initialControl.setStrobeDisable(True)
     # left.initialControl.setStrobeSensor(0)
     right = pipeline.create(dai.node.MonoCamera)
@@ -51,7 +85,7 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     right.setFps(fps)
     right.initialControl.setFrameSyncMode(dai.CameraControl.FrameSyncMode.INPUT)
-    right.initialControl.setStopStreaming()
+    # right.initialControl.setStopStreaming()
 
     if rgb_name is not None:
         rgb = pipeline.create(dai.node.ColorCamera)
@@ -60,7 +94,7 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
         # rgb.setVideoSize(640, 360)
         rgb.setFps(fps)
         rgb.initialControl.setFrameSyncMode(dai.CameraControl.FrameSyncMode.INPUT)
-        rgb.initialControl.setStopStreaming()
+        # rgb.initialControl.setStopStreaming()
 
     left_enc = pipeline.create(dai.node.VideoEncoder)
     left_enc.setDefaultProfilePreset(
@@ -98,7 +132,9 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     # disparity_enc.bitstream.link(disparity_xout.input)
 
     if rgb_name is not None:
-        rgb.video.link(rgb_enc.input)
+        rgb.video.link(script.inputs['frameIn'])
+        script.outputs['frameOut'].link(rgb_enc.input)
+        # rgb.video.link(rgb_enc.input)
         rgb_xout = pipeline.create(dai.node.XLinkOut)
         rgb_xout.setStreamName(rgb_name)
         # rgb_xout.input.setBlocking(False)
@@ -325,6 +361,7 @@ if __name__ == '__main__':
     rgb_control_qs = []
     mono_control_qs = []
     left_control_qs = []
+    record_qs = []
     logging.info(f'Found {len(device_infos)} devices')
     logging.info([dev.name for dev in device_infos])
 
@@ -389,9 +426,9 @@ if __name__ == '__main__':
         #     device = dai.Device(device_info)
         #     devices.append(device)
         n_streams = len(devices) * 3
-        grid_w = min(4, n_streams)
+        grid_w = min(3, n_streams)
         grid_h = int(np.ceil(n_streams / grid_w))
-        scale = max(1, math.ceil(math.log2(max(grid_h, grid_w)))**2)
+        scale = 2 #max(1, math.ceil(math.log2(max(grid_h, grid_w)))**2)
         images = [np.zeros((int(height/scale), int(width/scale), 3))
                     for i in range(grid_w * grid_h)]
         image_grid = np.arange(grid_w * grid_h)
@@ -417,6 +454,7 @@ if __name__ == '__main__':
 
             rgb_control_qs.append(device.getInputQueue(sn[2] + '_ctrl'))
             mono_control_qs.append(device.getInputQueue(sn[0] + '_ctrl'))
+            record_qs.append(device.getInputQueue('recordtog'))
 
             logging.info(device.getOutputQueueNames())
             left_q = device.getOutputQueue(sn[0], maxSize=fps, blocking=True)
@@ -491,6 +529,9 @@ if __name__ == '__main__':
                         ctrl = dai.CameraControl()
                         ctrl.setManualExposure(exposureTimeUs=20000, sensitivityIso=1600)
                         q.send(ctrl)
+                elif key == ord('r'):
+                    for q in record_qs:
+                        q.send(dai.Buffer())
                 changed = False
                 for i, cap in enumerate(disp_caps):
                     try:
