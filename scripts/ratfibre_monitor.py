@@ -64,7 +64,8 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
                 recordFrames += 1
                 ret = GPIO.write(MX_PIN_SET_VAL, True)  # Toggle the GPIO
                 if recordFrames % 10 == 0:
-                    node.warn('Frames captured (left): ' + str(recordFrames))
+                    node.warn('Frames captured (left): ' + str(recordFrames)
+                              + ' in ' + str(time.time() - start_time) + ' seconds')
             time.sleep(0.005)
             ret = GPIO.write(MX_PIN_SET_VAL, False)  # Toggle the GPIO
         '''
@@ -77,15 +78,17 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
         while (True):
             toggle = node.io['record'].tryGet()
             if toggle is not None:
-                record = not record
+                if not record and toggle.getData()[0]:
+                    start_time = time.time()
+                record = toggle.getData()[0]
                 node.warn('Record {name} toggle: ' + str(record))
             frame = node.io['frameIn'].get()
             if record:
                 node.io['frameOut'].send(frame)
                 recordFrames += 1
                 if recordFrames % 10 == 0:
-                    node.warn('Frames captured ({name}): ' + str(recordFrames))
-
+                    node.warn('Frames captured ({name}): ' + str(recordFrames)
+                              + ' in ' + str(time.time() - start_time) + ' seconds')
     '''
     scriptRight = pipeline.create(dai.node.Script)
     scriptRight.setScript(scriptString.format(name='right'))
@@ -96,6 +99,26 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     record_xin.out.link(scriptLeft.inputs['record'])
     record_xin.out.link(scriptRight.inputs['record'])
     record_xin.out.link(scriptRgb.inputs['record'])
+
+    scriptPreview = pipeline.create(dai.node.Script)
+    scriptPreview.setScript(
+        '''
+        select = 'in0'
+        while (True):
+            select_idx = node.io['select'].tryGet()
+            if select_idx is not None:
+                node.warn('Selecting input: ' + str(select_idx.getData()[0]))
+                select = 'in' + str(select_idx.getData()[0])
+            frame = node.io[select].get()
+            node.io['frameOut'].send(frame)
+        '''
+    )
+    scriptPreview.inputs['in0'].setBlocking(False)
+    scriptPreview.inputs['in1'].setBlocking(False)
+    scriptPreview.inputs['in2'].setBlocking(False)
+    preview_select_xin = pipeline.create(dai.node.XLinkIn)
+    preview_select_xin.setStreamName('preview_select')
+    preview_select_xin.out.link(scriptPreview.inputs['select'])
 
     left = pipeline.create(dai.node.MonoCamera)
     left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
@@ -116,8 +139,7 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
         rgb = pipeline.create(dai.node.ColorCamera)
         rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
         rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
-        rgb.setPreviewSize(1280, 800)
-        # rgb.setVideoSize(640, 360)
+        rgb.setPreviewSize(640, 400)
         rgb.setFps(fps)
         rgb.initialControl.setFrameSyncMode(dai.CameraControl.FrameSyncMode.INPUT)
         # rgb.initialControl.setStopStreaming()
@@ -144,28 +166,15 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     left.out.link(scriptLeft.inputs['frameIn'])
     scriptLeft.outputs['frameOut'].link(left_enc.input)
     # left.out.link(left_enc.input)
-    right.out.link(scriptRight.inputs['frameIn'])
-    scriptRight.outputs['frameOut'].link(right_enc.input)
-    # right.out.link(right_enc.input)
-    # stereo.rectifiedLeft.link(left_enc.input)
-    # stereo.rectifiedRight.link(right_enc.input)
-    left_preview_xout = pipeline.create(dai.node.XLinkOut)
-    left_preview_xout.setStreamName(left_name + '_preview')
-    left.out.link(left_preview_xout.input)
     left_xout = pipeline.create(dai.node.XLinkOut)
     left_xout.setStreamName(left_name)
-    right_preview_xout = pipeline.create(dai.node.XLinkOut)
-    right_preview_xout.setStreamName(right_name + '_preview')
-    right.out.link(right_preview_xout.input)
+    left_enc.bitstream.link(left_xout.input)
+
+    right.out.link(scriptRight.inputs['frameIn'])
+    scriptRight.outputs['frameOut'].link(right_enc.input)
     right_xout = pipeline.create(dai.node.XLinkOut)
     right_xout.setStreamName(right_name)
-    left_enc.bitstream.link(left_xout.input)
     right_enc.bitstream.link(right_xout.input)
-
-    # stereo.disparity.link(disparity_enc.input)
-    # disparity_xout = pipeline.create(dai.node.XLinkOut)
-    # disparity_xout.setStreamName(disparity_name)
-    # disparity_enc.bitstream.link(disparity_xout.input)
 
     if rgb_name is not None:
         rgb.video.link(scriptRgb.inputs['frameIn'])
@@ -173,12 +182,46 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
         # rgb.video.link(rgb_enc.input)
         rgb_xout = pipeline.create(dai.node.XLinkOut)
         rgb_xout.setStreamName(rgb_name)
-        rgb_preview_xout = pipeline.create(dai.node.XLinkOut)
-        rgb_preview_xout.setStreamName(rgb_name + '_preview')
-        rgb.preview.link(rgb_preview_xout.input)
         # rgb_xout.input.setBlocking(False)
         # rgb_xout.input.setQueueSize(1)
         rgb_enc.bitstream.link(rgb_xout.input)
+
+    rgb.preview.link(scriptPreview.inputs['in0'])
+    left.out.link(scriptPreview.inputs['in1'])
+    right.out.link(scriptPreview.inputs['in2'])
+    preview_manip = pipeline.create(dai.node.ImageManip)
+    preview_manip.initialConfig.setResize(640, 400)
+    scriptPreview.outputs['frameOut'].link(preview_manip.inputImage)
+    preview_xout = pipeline.create(dai.node.XLinkOut)
+    preview_xout.setStreamName('preview')
+    preview_manip.out.link(preview_xout.input)
+
+    # rgb_preview_xout = pipeline.create(dai.node.XLinkOut)
+    # rgb_preview_xout.setStreamName(rgb_name + '_preview')
+    # rgb.preview.link(rgb_preview_xout.input)
+    # # right.out.link(right_enc.input)
+    # # stereo.rectifiedLeft.link(left_enc.input)
+    # # stereo.rectifiedRight.link(right_enc.input)
+    # left_preview_manip = pipeline.create(dai.node.ImageManip)
+    # # left_preview_manip.initialConfig.setFrameType(dai.ImgFrame.Type.GRAY8)
+    # left_preview_manip.initialConfig.setResize(640, 400)
+    # left.out.link(left_preview_manip.inputImage)
+    # left_preview_xout = pipeline.create(dai.node.XLinkOut)
+    # left_preview_xout.setStreamName(left_name + '_preview')
+    # left_preview_manip.out.link(left_preview_xout.input)
+    # right_preview_manip = pipeline.create(dai.node.ImageManip)
+    # # right_preview_manip.initialConfig.setFrameType(dai.ImgFrame.Type.GRAY8)
+    # right_preview_manip.initialConfig.setResize(640, 400)
+    # right.out.link(right_preview_manip.inputImage)
+    # right_preview_xout = pipeline.create(dai.node.XLinkOut)
+    # right_preview_xout.setStreamName(right_name + '_preview')
+    # right_preview_manip.out.link(right_preview_xout.input)
+
+    # stereo.disparity.link(disparity_enc.input)
+    # disparity_xout = pipeline.create(dai.node.XLinkOut)
+    # disparity_xout.setStreamName(disparity_name)
+    # disparity_enc.bitstream.link(disparity_xout.input)
+
 
     # Camera control queue
     mono_ctrl = pipeline.createXLinkIn()
@@ -325,7 +368,7 @@ def capture_thread(device_q, write_q, decode_q, quit_event, decode_event, name):
 
 
 class CameraCapture():
-    def __init__(self, device_q, device_preview_q,
+    def __init__(self, device_q, #device_preview_q,
                  name, fps, width, height, decodec, encodec,
                  scale):
         self.name = name
@@ -342,7 +385,7 @@ class CameraCapture():
         self.capture_quit = threading.Event()
         self.write_quit = threading.Event()
         # self.decode_quit = threading.Event()
-        self.preview_quit = threading.Event()
+        # self.preview_quit = threading.Event()
         self.decode_enable = threading.Event()
         self.write_thread = threading.Thread(
             target=write_thread,
@@ -352,10 +395,10 @@ class CameraCapture():
         #     target=decode_thread,
         #     args=(self.decode_q, self.display_q, self.decode_quit, name,
         #           decodec, scale))
-        self.preview_thread = threading.Thread(
-            target=preview_thread,
-            args=(device_preview_q, self.display_q, self.preview_quit,
-                  name, scale))
+        # self.preview_thread = threading.Thread(
+        #     target=preview_thread,
+        #     args=(device_preview_q, self.display_q, self.preview_quit,
+        #           name, scale))
         self.capture_thread = threading.Thread(
             target=capture_thread,
             args=(device_q, self.write_q, self.decode_q, self.capture_quit,
@@ -366,7 +409,7 @@ class CameraCapture():
             self.name))
         self.write_thread.start()
         # self.decode_thread.start()
-        self.preview_thread.start()
+        # self.preview_thread.start()
         self.capture_thread.start()
         # while not (self.write_thread.is_alive() and
         #            self.decode_thread.is_alive() and
@@ -394,12 +437,12 @@ class CameraCapture():
         logging.debug('Waiting for capture thread to exit...')
         self.capture_thread.join()
         # self.decode_quit.set()
-        self.preview_quit.set()
+        # self.preview_quit.set()
         self.write_quit.set()
         # logging.debug('Waiting for decode thread to exit...')
         # self.decode_thread.join()
-        logging.debug('Waiting for preview thread to exit...')
-        self.preview_thread.join()
+        # logging.debug('Waiting for preview thread to exit...')
+        # self.preview_thread.join()
         logging.debug('Waiting for write thread to exit...')
         self.write_thread.join()
         logging.debug('Stopped threads for camera {}...'.format(
@@ -417,6 +460,8 @@ if __name__ == '__main__':
     fps = 30
     height = 800
     width = 1280
+    preview_height = 400
+    preview_width = 640
     # codec = 'h264_nvenc'
     log = logging.getLogger()
     log.setLevel(logging.getLevelName('INFO'))
@@ -432,6 +477,7 @@ if __name__ == '__main__':
     mono_control_qs = []
     left_control_qs = []
     record_qs = []
+    select_qs = []
     logging.info(f'Found {len(device_infos)} devices')
     logging.info([dev.name for dev in device_infos])
 
@@ -451,6 +497,7 @@ if __name__ == '__main__':
         # openvino_version = dai.OpenVINO.Version.VERSION_2021_4
         caps = []
         disp_caps = []
+        display_qs = []
 
         connect_q = queue.Queue(maxsize=len(device_infos))
         connect_threads = []
@@ -495,12 +542,12 @@ if __name__ == '__main__':
         #     logging.info(f'Connecting to {device_info}...')
         #     device = dai.Device(device_info)
         #     devices.append(device)
-        n_streams = len(devices) * 3
-        grid_w = min(3, n_streams)
+        n_streams = len(devices) #* 3
+        grid_w = min(2, n_streams)
         grid_h = int(np.ceil(n_streams / grid_w))
-        scale = 2 #max(1, math.ceil(math.log2(max(grid_h, grid_w)))**2)
-        images = [np.zeros((int(height/scale), int(width/scale), 3))
-                    for i in range(grid_w * grid_h)]
+        scale = 1
+        images = [np.zeros((preview_height, preview_width, 3))
+                  for i in range(grid_w * grid_h)]
         image_grid = np.arange(grid_w * grid_h)
         image_grid[n_streams:] = -1
         image_grid = image_grid.reshape((grid_h, grid_w))
@@ -525,20 +572,22 @@ if __name__ == '__main__':
             rgb_control_qs.append(device.getInputQueue(sn[2] + '_ctrl'))
             mono_control_qs.append(device.getInputQueue(sn[0] + '_ctrl'))
             record_qs.append(device.getInputQueue('record'))
+            select_qs.append(device.getInputQueue('preview_select'))
 
             logging.info(device.getOutputQueueNames())
+            preview_q = device.getOutputQueue('preview', maxSize=1, blocking=True)
             left_q = device.getOutputQueue(sn[0], maxSize=fps, blocking=True)
-            left_preview_q = device.getOutputQueue(sn[0] + '_preview', maxSize=1, blocking=True)
+            # left_preview_q = device.getOutputQueue(sn[0] + '_preview', maxSize=1, blocking=True)
             right_q = device.getOutputQueue(sn[1], maxSize=fps, blocking=True)
-            right_preview_q = device.getOutputQueue(sn[1] + '_preview', maxSize=1, blocking=True)
+            # right_preview_q = device.getOutputQueue(sn[1] + '_preview', maxSize=1, blocking=True)
             color_q = device.getOutputQueue(sn[2], maxSize=fps, blocking=True)
-            color_preview_q = device.getOutputQueue(sn[2] + '_preview', maxSize=1, blocking=True)
+            # color_preview_q = device.getOutputQueue(sn[2] + '_preview', maxSize=1, blocking=True)
             # disparity_q = device.getOutputQueue(sn[3], maxSize=fps, blocking=True)
-            left = CameraCapture(left_q, left_preview_q, sn[0], fps,
+            left = CameraCapture(left_q, sn[0], fps,
                                  width, height, 'h264', 'h264', scale)
-            right = CameraCapture(right_q, right_preview_q, sn[1], fps,
+            right = CameraCapture(right_q, sn[1], fps,
                                   width, height, 'h264', 'h264', scale)
-            color = CameraCapture(color_q, color_preview_q, sn[2], fps,
+            color = CameraCapture(color_q, sn[2], fps,
                                   width, height, 'h264', 'h264', scale)
             # disparity = CameraCapture(disparity_q, sn[3], fps, width, height, 'h264', 'h264')
             # left.enable_decoding()
@@ -554,7 +603,9 @@ if __name__ == '__main__':
             caps.append([color, right, left])
             # caps.append([right, left])
             # disp_caps.append(color)
-            disp_caps.extend([color, right, left])
+            # disp_caps.extend([color, right, left])
+            # disp_caps.extend([right, left])
+            display_qs.append(preview_q)
             # disp_caps.extend([right, left])
         # for q in mono_control_qs:
         #     ctrl = dai.CameraControl()
@@ -604,14 +655,35 @@ if __name__ == '__main__':
                         q.send(ctrl)
                 elif key == ord('r'):
                     for q in record_qs:
-                        q.send(dai.Buffer())
+                        buf = dai.Buffer()
+                        buf.setData(True)
+                        q.send(buf)
+                elif key == ord('\\'):
+                    for q in record_qs:
+                        buf = dai.Buffer()
+                        buf.setData(False)
+                        q.send(buf)
+                elif key == ord('0') or key == ord('1') or key == ord('2'):
+                    for q in select_qs:
+                        buf = dai.Buffer()
+                        buf.setData(key - ord('0'))
+                        q.send(buf)
                 changed = False
-                for i, cap in enumerate(disp_caps):
+                # for i, cap in enumerate(disp_caps):
+                for i, cap in enumerate(display_qs):
                     try:
                         # logging.info(f'Images size: {len(images), len(images[0])}')
                         # logging.info(f'i == {i}, i / 4 == {int(i / 4)}, i % 4 == {i % 4}')
                         # images[int(i / 4)][i % 4] = cap.display_q.get(timeout=0.001)
-                        images[i] = cap.display_q.get(timeout=0.001)
+                        message = preview_q.tryGet()
+                        if message is None:
+                            continue
+                        frame = message.getCvFrame()
+                        if len(frame.shape) == 2:
+                            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                        images[i] = frame
+                        # images[i] = cap.display_q.get(timeout=0.001)
+                        # logging.info(f'Got image from {cap.name}, size {images[i].shape}')
                         changed = True
                     except queue.Empty:
                         pass
@@ -634,6 +706,10 @@ if __name__ == '__main__':
         except Exception as e:
             logging.error(e)
         finally:
+            for q in record_qs:
+                buf = dai.Buffer()
+                buf.setData(False)
+                q.send(buf)
             for q in mono_control_qs:
                 ctrl = dai.CameraControl()
                 ctrl.setStopStreaming()
