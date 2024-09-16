@@ -65,7 +65,8 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
                 ret = GPIO.write(MX_PIN_SET_VAL, True)  # Toggle the GPIO
                 if recordFrames % 10 == 0:
                     node.warn('Frames captured (left): ' + str(recordFrames))
-            # time.sleep(0.001)
+            time.sleep(0.005)
+            ret = GPIO.write(MX_PIN_SET_VAL, False)  # Toggle the GPIO
         '''
     )
     scriptString = '''
