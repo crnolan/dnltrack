@@ -56,7 +56,9 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
         while (True):
             toggle = node.io['record'].tryGet()
             if toggle is not None:
-                record = not record
+                if not record and toggle.getData()[0]:
+                    start_time = time.time()
+                record = toggle.getData()[0]
                 node.warn('Record left toggle: ' + str(record))
             frame = node.io['frameIn'].get()
             if record:
@@ -100,25 +102,53 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
     record_xin.out.link(scriptRight.inputs['record'])
     record_xin.out.link(scriptRgb.inputs['record'])
 
-    scriptPreview = pipeline.create(dai.node.Script)
-    scriptPreview.setScript(
-        '''
-        select = 'in0'
+    # scriptPreview = pipeline.create(dai.node.Script)
+    # scriptPreview.setScript(
+    #     '''
+    #     select = 'in0'
+    #     nonselect = ['in1', 'in2']
+    #     while (True):
+    #         select_idx = node.io['select'].tryGet()
+    #         if select_idx is not None:
+    #             val = select_idx.getData()[0]
+    #             node.warn('Selecting input: ' + str(val))
+    #             select = 'in' + str(val)
+    #             nonselect = ['in' + str(i) for i in range(3) if i != val]
+    #         frame = node.io[select].get()
+    #         node.io['frameOut'].send(frame)
+    #         for ns in nonselect:
+    #             frame = node.io[ns].tryGet()
+    #     '''
+    # )
+    # scriptPreview.inputs['in0'].setBlocking(False)
+    # scriptPreview.inputs['in1'].setBlocking(False)
+    # scriptPreview.inputs['in2'].setBlocking(False)
+    # preview_select_xin = pipeline.create(dai.node.XLinkIn)
+    # preview_select_xin.setStreamName('preview_select')
+    # preview_select_xin.out.link(scriptPreview.inputs['select'])
+
+    scriptPreviewString = '''
+        id = {id}
+        select_idx = 0
         while (True):
-            select_idx = node.io['select'].tryGet()
-            if select_idx is not None:
-                node.warn('Selecting input: ' + str(select_idx.getData()[0]))
-                select = 'in' + str(select_idx.getData()[0])
-            frame = node.io[select].get()
-            node.io['frameOut'].send(frame)
-        '''
-    )
-    scriptPreview.inputs['in0'].setBlocking(False)
-    scriptPreview.inputs['in1'].setBlocking(False)
-    scriptPreview.inputs['in2'].setBlocking(False)
+            select_msg = node.io['select'].tryGet()
+            if select_msg is not None:
+                select_idx = select_msg.getData()[0]
+            frame = node.io['frameIn'].get()
+            if select_idx == id:
+                node.io['frameOut'].send(frame)
+    '''
+    scriptPreviewLeft = pipeline.create(dai.node.Script)
+    scriptPreviewLeft.setScript(scriptPreviewString.format(id=1))
+    scriptPreviewRight = pipeline.create(dai.node.Script)
+    scriptPreviewRight.setScript(scriptPreviewString.format(id=2))
+    scriptPreviewRgb = pipeline.create(dai.node.Script)
+    scriptPreviewRgb.setScript(scriptPreviewString.format(id=0))
     preview_select_xin = pipeline.create(dai.node.XLinkIn)
     preview_select_xin.setStreamName('preview_select')
-    preview_select_xin.out.link(scriptPreview.inputs['select'])
+    preview_select_xin.out.link(scriptPreviewLeft.inputs['select'])
+    preview_select_xin.out.link(scriptPreviewRight.inputs['select'])
+    preview_select_xin.out.link(scriptPreviewRgb.inputs['select'])
 
     left = pipeline.create(dai.node.MonoCamera)
     left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
@@ -143,6 +173,24 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
         rgb.setFps(fps)
         rgb.initialControl.setFrameSyncMode(dai.CameraControl.FrameSyncMode.INPUT)
         # rgb.initialControl.setStopStreaming()
+
+    # rgb.preview.link(scriptPreview.inputs['in0'])
+    # left.out.link(scriptPreview.inputs['in1'])
+    # right.out.link(scriptPreview.inputs['in2'])
+    left.out.link(scriptPreviewLeft.inputs['frameIn'])
+    right.out.link(scriptPreviewRight.inputs['frameIn'])
+    if rgb_name is not None:
+        rgb.video.link(scriptPreviewRgb.inputs['frameIn'])
+
+    preview_manip = pipeline.create(dai.node.ImageManip)
+    preview_manip.initialConfig.setResize(640, 400)
+    # scriptPreview.outputs['frameOut'].link(preview_manip.inputImage)
+    scriptPreviewLeft.outputs['frameOut'].link(preview_manip.inputImage)
+    scriptPreviewRight.outputs['frameOut'].link(preview_manip.inputImage)
+    scriptPreviewRgb.outputs['frameOut'].link(preview_manip.inputImage)
+    preview_xout = pipeline.create(dai.node.XLinkOut)
+    preview_xout.setStreamName('preview')
+    preview_manip.out.link(preview_xout.input)
 
     left_enc = pipeline.create(dai.node.VideoEncoder)
     left_enc.setDefaultProfilePreset(
@@ -186,15 +234,6 @@ def create_pipeline(fps, left_name, right_name, rgb_name, disparity_name):
         # rgb_xout.input.setQueueSize(1)
         rgb_enc.bitstream.link(rgb_xout.input)
 
-    rgb.preview.link(scriptPreview.inputs['in0'])
-    left.out.link(scriptPreview.inputs['in1'])
-    right.out.link(scriptPreview.inputs['in2'])
-    preview_manip = pipeline.create(dai.node.ImageManip)
-    preview_manip.initialConfig.setResize(640, 400)
-    scriptPreview.outputs['frameOut'].link(preview_manip.inputImage)
-    preview_xout = pipeline.create(dai.node.XLinkOut)
-    preview_xout.setStreamName('preview')
-    preview_manip.out.link(preview_xout.input)
 
     # rgb_preview_xout = pipeline.create(dai.node.XLinkOut)
     # rgb_preview_xout.setStreamName(rgb_name + '_preview')
