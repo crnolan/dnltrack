@@ -28,8 +28,8 @@ import av
 def create_pipeline(left_name, right_name, rgb_name):
 
     def _camera_setup(pipeline, camera, name):
-        camera.setFps(30)
-        # camera.initialControl.setExternalTrigger(1, 0)
+        camera.setFps(120)
+        camera.initialControl.setExternalTrigger(1, 0)
         record_xout = pipeline.create(dai.node.XLinkOut)
         record_xout.setStreamName(name)
         enc = pipeline.create(dai.node.VideoEncoder)
@@ -270,7 +270,7 @@ class Device():
         if self.device is not None or self.connect_thread is not None:
             return
         self.connect_thread = threading.Thread(
-            target=connect_thread, args=[self])
+            target=connect_thread, args=[self], daemon=True)
         self.connect_thread.start()
 
     def is_connecting(self):
@@ -282,61 +282,68 @@ class Device():
             return self.device is not None
 
     def start(self):
-        with self.lock:
-            logging.debug('Starting decode process for device {}...'.format(
-                self.name))
-            self.decode_process.start()
-            logging.debug('Started decode process for device {}...'.format(
-                self.name))
-            self.left.start()
-            self.right.start()
-            self.rgb.start()
-            self.rgb.enable_decoding()
+        if self.is_connected():
+            with self.lock:
+                logging.debug('Starting decode process for device {}...'.format(
+                    self.name))
+                self.decode_process.start()
+                logging.debug('Started decode process for device {}...'.format(
+                    self.name))
+                self.left.start()
+                self.right.start()
+                self.rgb.start()
+                self.rgb.enable_decoding()
 
     def stop(self):
-        with self.lock:
-            self.left.stop()
-            self.right.stop()
-            self.rgb.stop()
-            self.decode_quit.set()
-            while not self.display_q.empty():
-                self.display_q.get()
-            while self.decode_process.is_alive():
-                logging.debug('Waiting for decode thread to exit...')
-                self.decode_process.join(5)
-            logging.debug('Stopped processes for camera {}...'.format(
-                self.name))
-            self.device.close()
+        if self.is_connected():
+            with self.lock:
+                self.left.stop()
+                self.right.stop()
+                self.rgb.stop()
+                self.decode_quit.set()
+                while not self.display_q.empty():
+                    self.display_q.get()
+                while self.decode_process.is_alive():
+                    logging.debug('Waiting for decode thread to exit...')
+                    self.decode_process.join(5)
+                logging.debug('Stopped processes for camera {}...'.format(
+                    self.name))
+                self.device.close()
 
     def select_left(self):
-        with self.lock:
-            self.right.disable_decoding()
-            self.rgb.disable_decoding()
-            self.left.enable_decoding()
+        if self.is_connected():
+            with self.lock:
+                self.right.disable_decoding()
+                self.rgb.disable_decoding()
+                self.left.enable_decoding()
 
     def select_right(self):
-        with self.lock:
-            self.left.disable_decoding()
-            self.rgb.disable_decoding()
-            self.right.enable_decoding()
+        if self.is_connected():
+            with self.lock:
+                self.left.disable_decoding()
+                self.rgb.disable_decoding()
+                self.right.enable_decoding()
 
     def select_rgb(self):
-        with self.lock:
-            self.left.disable_decoding()
-            self.right.disable_decoding()
-            self.rgb.enable_decoding()
+        if self.is_connected():
+            with self.lock:
+                self.left.disable_decoding()
+                self.right.disable_decoding()
+                self.rgb.enable_decoding()
 
     def enable_recording(self):
-        with self.lock:
-            self.left.enable_recording()
-            self.right.enable_recording()
-            self.rgb.enable_recording()
+        if self.is_connected():
+            with self.lock:
+                self.left.enable_recording()
+                self.right.enable_recording()
+                self.rgb.enable_recording()
 
     def disable_recording(self):
-        with self.lock:
-            self.left.disable_recording()
-            self.right.disable_recording()
-            self.rgb.disable_recording()
+        if self.is_connected():
+            with self.lock:
+                self.left.disable_recording()
+                self.right.disable_recording()
+                self.rgb.disable_recording()
 
 
 if __name__ == '__main__':
@@ -388,7 +395,7 @@ if __name__ == '__main__':
         n_streams = len(devices)
         grid_w = int(np.ceil(np.sqrt(n_streams)))
         grid_h = int(np.ceil(n_streams / grid_w))
-        aspect = 1280/800
+        aspect = (1280*grid_w)/(800*grid_h)
         image_grid = np.arange(grid_w * grid_h)
         image_grid[n_streams:] = -1
         image_grid = image_grid.reshape((grid_h, grid_w))
