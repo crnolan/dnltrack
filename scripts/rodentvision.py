@@ -439,12 +439,6 @@ if __name__ == '__main__':
                         try:
                             frame = d['device'].display_q.get_nowait()
                             d['image'] = frame
-                            cv2.putText(frame, f'{d["group"]}-{d["camera"]}', (10, 30),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                            if recording:
-                                cv2.putText(frame, 'Recording', (10, 60),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                            d['image'] = frame
                             changed = True
                         except queue.Empty:
                             pass
@@ -452,10 +446,10 @@ if __name__ == '__main__':
                     images = []
                     for d in devices:
                         image = d['image']
-                        cv2.putText(frame, f'{d["group"]}-{d["camera"]}', (10, 30),
+                        cv2.putText(image, f'{d["group"]}-{d["camera"]}', (10, 30),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                         if recording:
-                            cv2.putText(frame, 'Recording', (10, 60),
+                            cv2.putText(image, 'Recording', (10, 60),
                                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                         images.append(image)
                     disp_im = np.concatenate([np.concatenate([images[i] for i in row], axis=1)
