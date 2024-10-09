@@ -412,6 +412,7 @@ if __name__ == '__main__':
             key = None
             recording = False
             while True:
+                changed = False
                 if key == ord('q'):
                     raise KeyboardInterrupt()
                 elif key == ord('0'):
@@ -427,15 +428,17 @@ if __name__ == '__main__':
                     recording = True
                     for d in devices:
                         d['device'].enable_recording()
+                    changed = True
                 elif key == ord('s'):
                     for d in devices:
                         d['device'].disable_recording()
                     recording = False
-                changed = False
+                    changed = True
                 for d in devices:
                     if d['device'].is_connected():
                         try:
                             frame = d['device'].display_q.get_nowait()
+                            d['image'] = frame
                             cv2.putText(frame, f'{d["group"]}-{d["camera"]}', (10, 30),
                                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                             if recording:
@@ -446,7 +449,16 @@ if __name__ == '__main__':
                         except queue.Empty:
                             pass
                 if changed:
-                    disp_im = np.concatenate([np.concatenate([devices[i]['image'] for i in row], axis=1)
+                    images = []
+                    for d in devices:
+                        image = d['image']
+                        cv2.putText(frame, f'{d["group"]}-{d["camera"]}', (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                        if recording:
+                            cv2.putText(frame, 'Recording', (10, 60),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                        images.append(image)
+                    disp_im = np.concatenate([np.concatenate([images[i] for i in row], axis=1)
                                               for row in image_grid], axis=0)
                     _, _, winw, winh = cv2.getWindowImageRect('RodentVision')
                     w = min(winw, int(aspect * winh))
