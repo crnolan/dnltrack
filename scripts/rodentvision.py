@@ -75,7 +75,7 @@ def run_capture(hw_device, decode_q, quit_event, decode_event, record_event,
                 name, codec, width, height, fps):
     '''Capture images from camera and add to the queue'''
 
-    logging.info('Capture process started for camera {}'.format(name))
+    logging.debug('Capture thread started for camera {}'.format(name))
     # codec = 'h264'
     # codec = 'hevc'
     # codec = 'h264_nvenc'
@@ -84,7 +84,7 @@ def run_capture(hw_device, decode_q, quit_event, decode_event, record_event,
     filename = '{}-{}.mp4'.format(name, time.strftime(time_format))
     output_container = av.open(filename, 'w')
     stream = output_container.add_stream(codec, fps)
-    logging.info('Capture thread for camera {} alive'.format(name))
+    logging.debug('Capture thread for camera {} alive'.format(name))
     stream.time_base = Fraction(1, 1000*1000) # Microseconds
     logging.debug('Timebase == {}'.format(stream.time_base))
     # t0 = int(time.time_ns())
@@ -121,7 +121,7 @@ def run_capture(hw_device, decode_q, quit_event, decode_event, record_event,
             # logging.debug('Writing pts / dts == {} at time == {}'.format(ts, time.time_ns()))
             output_container.mux_one(packet)
             write_count += 1
-    logging.info('Capture count for camera {}: {}'.format(name, capture_count))
+    logging.debug('Capture count for camera {}: {}'.format(name, capture_count))
     logging.info('Write count for camera {}: {}'.format(name, write_count))
 
 
@@ -206,7 +206,7 @@ def connect_thread(device):
     logging.info(f'Connecting to {device.device_info.name}')
     hw_device = dai.Device(device.device_info)
     sn = [device.filename_root + s for s in ['_left', '_right', '_rgb']]
-    logging.info(f'{sn}')
+    logging.debug(f'{sn}')
     logging.info(f'Connected to {device.device_info.name}, starting pipeline')
     pipeline, resolution = create_pipeline(*sn)
     hw_device.setIrFloodLightIntensity(0.1)
