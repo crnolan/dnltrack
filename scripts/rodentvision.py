@@ -10,6 +10,7 @@ import threading
 import queue
 import logging
 import sys
+import os
 from multiprocessing import Process, Value, Queue, Event
 
 # Start CV2 window thread to display images
@@ -17,6 +18,8 @@ from multiprocessing import Process, Value, Queue, Event
 # https://github.com/PyAV-Org/PyAV/issues/978
 # https://github.com/opencv/opencv/issues/21952
 if __name__ == '__main__':
+    os.environ["DEPTHAI_WATCHDOG_INITIAL_DELAY"] = "60000"
+    os.environ["DEPTHAI_BOOTUP_TIMEOUT"] = "60000"
     cv2.startWindowThread()
     # cv2.namedWindow('RodentVision', cv2.WND_PROP_AUTOSIZE)
     cv2.namedWindow('RodentVision', cv2.WINDOW_NORMAL)
@@ -25,11 +28,14 @@ if __name__ == '__main__':
 import av
 
 
-def create_pipeline(left_name, right_name, rgb_name):
+def create_pipeline(left_name, right_name, rgb_name, fps=None):
 
-    def _camera_setup(pipeline, camera, name):
-        camera.setFps(120)
-        camera.initialControl.setExternalTrigger(1, 0)
+    def _camera_setup(pipeline, camera, name, fps=None):
+        if fps is None:
+            camera.setFps(120)
+            camera.initialControl.setExternalTrigger(1, 0)
+        else:
+            camera.setFps(fps)
         record_xout = pipeline.create(dai.node.XLinkOut)
         record_xout.setStreamName(name)
         enc = pipeline.create(dai.node.VideoEncoder)
@@ -50,9 +56,9 @@ def create_pipeline(left_name, right_name, rgb_name):
     rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
     rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
 
-    left_enc, left_record = _camera_setup(pipeline, left, left_name)
-    right_enc, right_record = _camera_setup(pipeline, right, right_name)
-    rgb_enc, rgb_record = _camera_setup(pipeline, rgb, rgb_name)
+    left_enc, left_record = _camera_setup(pipeline, left, left_name, fps)
+    right_enc, right_record = _camera_setup(pipeline, right, right_name, fps)
+    rgb_enc, rgb_record = _camera_setup(pipeline, rgb, rgb_name, fps)
 
     left.out.link(left_enc.input)
     right.out.link(right_enc.input)
@@ -71,58 +77,127 @@ def create_pipeline(left_name, right_name, rgb_name):
     return pipeline, left.getResolutionSize()
 
 
-def run_capture(hw_device, decode_q, quit_event, decode_event, record_event,
-                name, codec, width, height, fps):
-    '''Capture images from camera and add to the queue'''
+# def run_capture(hw_device, decode_q, quit_event, decode_event, record_event,
+#                 name, codec, width, height, fps):
+#     '''Capture images from camera and add to the queue'''
 
-    logging.debug('Capture thread started for camera {}'.format(name))
-    # codec = 'h264'
-    # codec = 'hevc'
-    # codec = 'h264_nvenc'
-    device_q = hw_device.getOutputQueue(name, maxSize=30, blocking=True)
+#     logging.debug('Capture thread started for camera {}'.format(name))
+#     # codec = 'h264'
+#     # codec = 'hevc'
+#     # codec = 'h264_nvenc'
+#     # device_q = hw_device.getOutputQueue(name, maxSize=30, blocking=True)
+#     device_q = None
+#     time_format = '%y%m%d_%H%M%S'
+#     filename = '{}-{}.mp4'.format(name, time.strftime(time_format))
+#     output_container = av.open(filename, 'w')
+#     stream = output_container.add_stream(codec, fps)
+#     logging.debug('Capture thread for camera {} alive'.format(name))
+#     stream.time_base = Fraction(1, 1000*1000) # Microseconds
+#     logging.debug('Timebase == {}'.format(stream.time_base))
+#     # t0 = int(time.time_ns())
+#     stream.width = width
+#     stream.height = height
+#     write_count = 0
+#     capture_count = 0
+
+#     # t0 = int(time.time_ns())
+#     t0 = -1
+#     treport = time.time()
+#     while not quit_event.is_set():
+#         try:
+#             if device_q is None:
+#                 device_q = hw_device.getOutputQueue(name, maxSize=30, blocking=True)
+#             if time.time() - treport > 10:
+#                 logging.debug('Capture thread for camera {} alive'.format(name))
+#                 treport = time.time()
+#             message = device_q.tryGet()
+#             if message is None:
+#                 time.sleep(0.001)
+#                 continue
+#             data = message.getData()
+#             capture_count += 1
+#             if decode_event.is_set():
+#                 try:
+#                     decode_q.put(data, block=False)
+#                 except queue.Full:
+#                     logging.debug('Decode queue full, showing reduced framerate')
+#             if record_event.is_set():
+#                 if t0 == -1:
+#                     t0 = message.getTimestamp()
+#                 ts = message.getTimestamp() - t0
+#                 packet = av.Packet(data)
+#                 packet.pts = ts // timedelta(microseconds=1)
+#                 packet.dts = ts // timedelta(microseconds=1)
+#                 # logging.debug('Writing pts / dts == {} at time == {}'.format(ts, time.time_ns()))
+#                 output_container.mux_one(packet)
+#                 write_count += 1
+#         except RuntimeError as e:
+#             logging.warning(e)
+#             time.sleep(1/fps)
+#     logging.debug('Capture count for camera {}: {}'.format(name, capture_count))
+#     logging.info('Write count for camera {}: {}'.format(name, write_count))
+
+def open_container(name, codec, width, height, fps):
     time_format = '%y%m%d_%H%M%S'
     filename = '{}-{}.mp4'.format(name, time.strftime(time_format))
     output_container = av.open(filename, 'w')
     stream = output_container.add_stream(codec, fps)
-    logging.debug('Capture thread for camera {} alive'.format(name))
     stream.time_base = Fraction(1, 1000*1000) # Microseconds
     logging.debug('Timebase == {}'.format(stream.time_base))
-    # t0 = int(time.time_ns())
     stream.width = width
     stream.height = height
-    write_count = 0
-    capture_count = 0
+    return output_container
 
-    # t0 = int(time.time_ns())
+
+def run_capture(device):
+    '''Capture images from camera and add to the queue'''
+
+    logging.debug('Capture thread started for device {}'.format(device.name))
+    logging.info('Device {} starting with recording == {}'.format(
+        device.name, device.record_event.is_set()))
+    device.start_pipeline()
+    streams = device.device.getOutputQueueNames()
+    # Open a container for each stream
+    containers = {name: open_container(name, device.encodec, device.width,
+                                       device.height, device.fps)
+                  for name in streams}
+    logging.debug('Capture thread for device {} alive'.format(device.name))
+    write_count = {name: 0 for name in streams}
+    capture_count = {name: 0 for name in streams}
+
     t0 = -1
     treport = time.time()
-    while not quit_event.is_set():
+    while not device.capture_quit.is_set():
         if time.time() - treport > 10:
-            logging.debug('Capture thread for camera {} alive'.format(name))
+            logging.debug('Capture thread for device {} alive'.format(device.name))
             treport = time.time()
-        message = device_q.tryGet()
-        if message is None:
-            time.sleep(0.001)
-            continue
-        data = message.getData()
-        capture_count += 1
-        if decode_event.is_set():
-            try:
-                decode_q.put(data, block=False)
-            except queue.Full:
-                logging.debug('Decode queue full, showing reduced framerate')
-        if record_event.is_set():
-            if t0 == -1:
-                t0 = message.getTimestamp()
-            ts = message.getTimestamp() - t0
-            packet = av.Packet(data)
-            packet.pts = ts // timedelta(microseconds=1)
-            packet.dts = ts // timedelta(microseconds=1)
-            # logging.debug('Writing pts / dts == {} at time == {}'.format(ts, time.time_ns()))
-            output_container.mux_one(packet)
-            write_count += 1
-    logging.debug('Capture count for camera {}: {}'.format(name, capture_count))
-    logging.info('Write count for camera {}: {}'.format(name, write_count))
+        for name in streams:
+            message = device.capture_qs[name].tryGet()
+            if message is None:
+                continue
+            data = message.getData()
+            capture_count[name] += 1
+            if device.camera_select == name.split('_')[-1]:
+                try:
+                    device.decode_q.put(data, block=False)
+                except queue.Full:
+                    logging.debug('Decode queue full, showing reduced framerate')
+
+            if device.record_event.is_set():
+                if t0 == -1:
+                    t0 = message.getTimestamp()
+                ts = message.getTimestamp() - t0
+                packet = av.Packet(data)
+                packet.pts = ts // timedelta(microseconds=1)
+                packet.dts = ts // timedelta(microseconds=1)
+                containers[name].mux_one(packet)
+                write_count[name] += 1
+
+    device.device.close()
+
+    for name in streams:
+        logging.debug('Capture count for camera {}: {}'.format(name, capture_count[name]))
+        logging.info('Write count for camera {}: {}'.format(name, write_count[name]))
 
 
 def run_decode(decode_q, display_q, quit_event, name, codec):
@@ -137,13 +212,13 @@ def run_decode(decode_q, display_q, quit_event, name, codec):
                 try:
                     display_q.put(image[:, :, ::-1], block=False)
                 except queue.Full:
-                    logging.debug('Display queue full for {}'.format(name))
+                    logging.info('Display queue full for {}'.format(name))
         except queue.Empty:
             pass
 
 
 class CameraCapture():
-    def __init__(self, device_q, decode_q, name, resolution, fps, encodec):
+    def __init__(self, device, decode_q, name, resolution, fps, encodec):
         self.name = name
         self.width = resolution[0]
         self.height = resolution[1]
@@ -155,7 +230,7 @@ class CameraCapture():
         self.capture_quit = threading.Event()
         self.capture_process = threading.Thread(
             target=run_capture,
-            args=(device_q, self.decode_q, self.capture_quit,
+            args=(device, self.decode_q, self.capture_quit,
                   self.decode, self.record, name,
                   encodec, self.width, self.height, self.fps))
 
@@ -204,38 +279,34 @@ class CameraCapture():
 
 def connect_thread(device):
     logging.info(f'Connecting to {device.device_info.name}')
+    while device.device_info.state != dai.XLinkDeviceState.X_LINK_BOOTLOADER:
+        logging.info(f'Waiting for device {device.device_info.name} '
+                     f'to enter bootloader state')
+        time.sleep(1)
     hw_device = dai.Device(device.device_info)
-    sn = [device.filename_root + s for s in ['_left', '_right', '_rgb']]
-    logging.debug(f'{sn}')
-    logging.info(f'Connected to {device.device_info.name}, starting pipeline')
-    pipeline, resolution = create_pipeline(*sn)
-    hw_device.setIrFloodLightIntensity(0.1)
-    hw_device.startPipeline(pipeline)
-    logging.info(f'Pipeline started for  {device.device_info.name}')
-    mono_control_q = hw_device.getInputQueue(sn[0] + '_ctrl')
-    rgb_control_q = hw_device.getInputQueue(sn[2] + '_ctrl')
-    left = CameraCapture(hw_device, device.decode_q,
-                         sn[0], resolution, device.fps, device.encodec)
-    right = CameraCapture(hw_device, device.decode_q,
-                          sn[1], resolution, device.fps, device.encodec)
-    rgb = CameraCapture(hw_device, device.decode_q,
-                        sn[2], resolution, device.fps, device.encodec)
-
     with device.lock:
         device.device = hw_device
+    sn = [device.filename_root + s for s in ['_left', '_right', '_rgb']]
+    logging.debug(f'{sn}')
+    logging.info(f'Connected to {device.device_info.name}'
+                 f' creating pipeline with triggered == {device.triggered}')
+    if device.triggered:
+        pipeline, resolution = create_pipeline(*sn)
+    else:
+        logging.info(f'Creating pipeline with fps == {device.fps}')
+        pipeline, resolution = create_pipeline(*sn, device.fps)
+        device.enable_recording()
+    hw_device.setIrFloodLightIntensity(0.1)
+
+    with device.lock:
         device.pipeline = pipeline
         device.width = resolution[0]
         device.height = resolution[1]
-        device.mono_control_q = mono_control_q
-        device.rgb_control_q = rgb_control_q
-        device.left = left
-        device.right = right
-        device.rgb = rgb
     device.start()
 
 
 class Device():
-    def __init__(self, name, device_info, group, fps=30):
+    def __init__(self, name, device_info, group, fps, triggered):
         self.name = name
         self.device_info = device_info
         self.group = group
@@ -247,24 +318,21 @@ class Device():
         self.width = None
         self.height = None
         self.fps = fps
+        self.triggered = triggered
         self.lock = threading.Lock()
         self.filename_root = f'group-{group}_camera-{name}'
         self.rgb_control_q = None
         self.mono_control_q = None
         self.camera_select = 'rgb'
-        self.rgb_q = None
-        self.left_q = None
-        self.right_q = None
         self.decode_quit = Event()
         self.decode_q = Queue(maxsize=1)
         self.display_q = Queue(maxsize=1)
-        self.decode_process = Process(
-            target=run_decode,
-            args=(self.decode_q, self.display_q, self.decode_quit,
-                  name, self.decodec))
-        self.left = None
-        self.right = None
-        self.rgb = None
+        self.record_event = threading.Event()
+        self.capture_quit = threading.Event()
+        self.connect_thread = None
+        self.decode_process = None
+        self.capture_thread = None
+        self.capture_qs = {}
 
     def connect(self):
         if self.device is not None or self.connect_thread is not None:
@@ -274,76 +342,89 @@ class Device():
         self.connect_thread.start()
 
     def is_connecting(self):
-        with self.lock:
-            return self.connect_thread is not None and self.device is None
+        return self.connect_thread is not None and self.device is None
 
     def is_connected(self):
-        with self.lock:
-            return self.device is not None
+        return self.device is not None
+
+    def is_running(self):
+        if not self.is_connected():
+            return False
+        if self.device.isPipelineRunning():
+            return True
+        return False
+
+    def start_pipeline(self):
+        if self.is_connected() and not self.is_running():
+            self.device.startPipeline(self.pipeline)
+            with self.lock:
+                self.mono_control_q = self.device.getInputQueue(
+                    self.filename_root + '_left_ctrl')
+                self.rgb_control_q = self.device.getInputQueue(
+                    self.filename_root + '_rgb_ctrl')
+                for name in self.device.getOutputQueueNames():
+                    self.capture_qs[name] = self.device.getOutputQueue(
+                        name=name, maxSize=30, blocking=False)
 
     def start(self):
-        if self.is_connected():
-            with self.lock:
-                logging.debug('Starting decode process for device {}...'.format(
-                    self.name))
+        if self.is_connected() and not self.is_running():
+            if self.decode_process is None or not self.decode_process.is_alive():
+                self.decode_process = Process(
+                    target=run_decode,
+                    args=(self.decode_q, self.display_q, self.decode_quit,
+                          self.name, self.decodec))
+                logging.debug('Starting decode process for device {}'.format(
+                        self.name))
                 self.decode_process.start()
-                logging.debug('Started decode process for device {}...'.format(
-                    self.name))
-                self.left.start()
-                self.right.start()
-                self.rgb.start()
-                self.rgb.enable_decoding()
+                logging.debug('Started decode process for device {}'.format(
+                        self.name))
+            if self.capture_thread is None or not self.capture_thread.is_alive():
+                self.capture_thread = threading.Thread(
+                        target=run_capture,
+                        args=[self])
+                logging.debug('Starting capture thread for device {}'.format(
+                              self.name))
+                self.capture_thread.start()
+                logging.debug('Started capture thread for device {}'.format(
+                              self.name))
 
     def stop(self):
         if self.is_connected():
-            with self.lock:
-                self.left.stop()
-                self.right.stop()
-                self.rgb.stop()
-                self.decode_quit.set()
-                while not self.display_q.empty():
-                    self.display_q.get()
-                while self.decode_process.is_alive():
-                    logging.debug('Waiting for decode thread to exit...')
-                    self.decode_process.join(5)
-                logging.debug('Stopped processes for camera {}...'.format(
-                    self.name))
-                self.device.close()
+            self.capture_quit.set()
+            self.capture_thread.join()
+            self.decode_quit.set()
+            while not self.display_q.empty():
+                self.display_q.get()
+            while self.decode_process.is_alive():
+                logging.debug('Waiting for decode thread to exit...')
+                self.decode_process.join(5)
+            logging.debug('Stopped processes for camera {}...'.format(
+                self.name))
+            # self.device.close()
 
     def select_left(self):
-        if self.is_connected():
-            with self.lock:
-                self.right.disable_decoding()
-                self.rgb.disable_decoding()
-                self.left.enable_decoding()
+        with self.lock:
+            self.camera_select = 'left'
 
     def select_right(self):
-        if self.is_connected():
-            with self.lock:
-                self.left.disable_decoding()
-                self.rgb.disable_decoding()
-                self.right.enable_decoding()
+        with self.lock:
+            self.camera_select = 'right'
 
     def select_rgb(self):
-        if self.is_connected():
-            with self.lock:
-                self.left.disable_decoding()
-                self.right.disable_decoding()
-                self.rgb.enable_decoding()
+        with self.lock:
+            self.camera_select = 'rgb'
 
     def enable_recording(self):
         if self.is_connected():
-            with self.lock:
-                self.left.enable_recording()
-                self.right.enable_recording()
-                self.rgb.enable_recording()
+            logging.info(f'Enabling recording for device {self.name}')
+            self.record_event.set()
 
     def disable_recording(self):
         if self.is_connected():
-            with self.lock:
-                self.left.disable_recording()
-                self.right.disable_recording()
-                self.rgb.disable_recording()
+            self.record_event.clear()
+
+    def is_recording(self):
+        return self.record_event.is_set()
 
 
 if __name__ == '__main__':
@@ -369,6 +450,14 @@ if __name__ == '__main__':
     if 'groups' not in config:
         logging.error('No camera groups found in config file')
         sys.exit(1)
+    if 'fps' not in config:
+        logging.error('No fps found in config file')
+        sys.exit(1)
+    if 'triggered' not in config:
+        logging.error('No trigger information found in config file')
+        sys.exit(1)
+    else:
+        print(f'Triggered == {config["triggered"]}')
 
     devices = []
     try:
@@ -382,7 +471,8 @@ if __name__ == '__main__':
                         break
                 if device_info is None:
                     raise ValueError(f'Could not find device with IP {details["ip"]}')
-                device = Device(camera, device_info, name)
+                device = Device(camera, device_info, name,
+                                config['fps'], config['triggered'])
                 device.connect()
                 devices.append({
                     'group': name,
@@ -424,15 +514,13 @@ if __name__ == '__main__':
                 elif key == ord('2'):
                     for d in devices:
                         d['device'].select_right()
-                elif key == ord('r'):
-                    recording = True
+                elif key == ord('r') and d['device'].triggered:
                     for d in devices:
                         d['device'].enable_recording()
                     changed = True
-                elif key == ord('s'):
+                elif key == ord('s') and d['device'].triggered:
                     for d in devices:
                         d['device'].disable_recording()
-                    recording = False
                     changed = True
                 for d in devices:
                     if d['device'].is_connected():
@@ -448,7 +536,7 @@ if __name__ == '__main__':
                         image = d['image']
                         cv2.putText(image, f'{d["group"]}-{d["camera"]}', (10, 30),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                        if recording:
+                        if d['device'].is_recording():
                             cv2.putText(image, 'Recording', (10, 60),
                                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                         images.append(image)
@@ -470,6 +558,6 @@ if __name__ == '__main__':
         logging.exception(e)
     finally:
         for d in devices:
-            d['device'].disable_recording()
+            # d['device'].disable_recording()
             d['device'].stop()
     logging.info('Exiting...')
