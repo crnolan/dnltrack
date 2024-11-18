@@ -78,72 +78,12 @@ def create_pipeline(left_name, right_name, rgb_name, fps=None):
     return pipeline, left.getResolutionSize()
 
 
-# def run_capture(hw_device, decode_q, quit_event, decode_event, record_event,
-#                 name, codec, width, height, fps):
-#     '''Capture images from camera and add to the queue'''
-
-#     logging.debug('Capture thread started for camera {}'.format(name))
-#     # codec = 'h264'
-#     # codec = 'hevc'
-#     # codec = 'h264_nvenc'
-#     # device_q = hw_device.getOutputQueue(name, maxSize=30, blocking=True)
-#     device_q = None
-#     time_format = '%y%m%d_%H%M%S'
-#     filename = '{}-{}.mp4'.format(name, time.strftime(time_format))
-#     output_container = av.open(filename, 'w')
-#     stream = output_container.add_stream(codec, fps)
-#     logging.debug('Capture thread for camera {} alive'.format(name))
-#     stream.time_base = Fraction(1, 1000*1000) # Microseconds
-#     logging.debug('Timebase == {}'.format(stream.time_base))
-#     # t0 = int(time.time_ns())
-#     stream.width = width
-#     stream.height = height
-#     write_count = 0
-#     capture_count = 0
-
-#     # t0 = int(time.time_ns())
-#     t0 = -1
-#     treport = time.time()
-#     while not quit_event.is_set():
-#         try:
-#             if device_q is None:
-#                 device_q = hw_device.getOutputQueue(name, maxSize=30, blocking=True)
-#             if time.time() - treport > 10:
-#                 logging.debug('Capture thread for camera {} alive'.format(name))
-#                 treport = time.time()
-#             message = device_q.tryGet()
-#             if message is None:
-#                 time.sleep(0.001)
-#                 continue
-#             data = message.getData()
-#             capture_count += 1
-#             if decode_event.is_set():
-#                 try:
-#                     decode_q.put(data, block=False)
-#                 except queue.Full:
-#                     logging.debug('Decode queue full, showing reduced framerate')
-#             if record_event.is_set():
-#                 if t0 == -1:
-#                     t0 = message.getTimestamp()
-#                 ts = message.getTimestamp() - t0
-#                 packet = av.Packet(data)
-#                 packet.pts = ts // timedelta(microseconds=1)
-#                 packet.dts = ts // timedelta(microseconds=1)
-#                 # logging.debug('Writing pts / dts == {} at time == {}'.format(ts, time.time_ns()))
-#                 output_container.mux_one(packet)
-#                 write_count += 1
-#         except RuntimeError as e:
-#             logging.warning(e)
-#             time.sleep(1/fps)
-#     logging.debug('Capture count for camera {}: {}'.format(name, capture_count))
-#     logging.info('Write count for camera {}: {}'.format(name, write_count))
-
 def open_container(name, codec, width, height, fps):
     time_format = '%y%m%d_%H%M%S'
     filename = '{}-{}.mp4'.format(name, time.strftime(time_format))
     output_container = av.open(filename, 'w')
     stream = output_container.add_stream(codec, fps)
-    stream.time_base = Fraction(1, 1000*1000) # Microseconds
+    stream.time_base = Fraction(1, 1000*1000)  # Microseconds
     logging.debug('Timebase == {}'.format(stream.time_base))
     stream.width = width
     stream.height = height
@@ -204,14 +144,6 @@ def run_capture(device):
 def run_decode(decode_q, display_q, quit_event, name, codec):
     '''Decode images and sent to display queue'''
     logger = multiprocessing.get_logger()
-    # logger = logging.getLogger(__name__ + name + '_decode')
-    # fh = logging.FileHandler(f'{name}_decode_{time.time()}.log')
-    # fh.setLevel(logging.DEBUG)
-    # fh.setFormatter(logging.Formatter(
-    #     "%(asctime)s [%(levelname)s] %(name)s: %(message)s [%(threadName)s] "
-    # ))
-    # logger.addHandler(fh)
-    # logger.
     codec = av.CodecContext.create(codec, 'r')
     decode_count = 0
     while not quit_event.is_set():
@@ -290,8 +222,7 @@ class Device():
     def connect(self):
         if self.device is not None or self.connect_thread is not None:
             return
-        self.connect_thread = threading.Thread(
-            target=connect_thread, args=[self], daemon=True)
+        self.connect_thread = threading.Thread(            target=connect_thread, args=[self], daemon=True)
         self.connect_thread.start()
 
     def is_connecting(self):
@@ -302,6 +233,8 @@ class Device():
 
     def is_running(self):
         if not self.is_connected():
+            return False
+        if self.device.isClosed():
             return False
         if self.device.isPipelineRunning():
             return True
@@ -326,34 +259,45 @@ class Device():
                     target=run_decode,
                     args=(self.decode_q, self.display_q, self.decode_quit,
                           self.filename_root, self.decodec))
-                logging.debug('Starting decode process for device {}'.format(
-                        self.name))
+                logging.debug(f'Starting decode process for device '
+                              f'{self.filename_root}')
                 self.decode_process.start()
-                logging.debug('Started decode process for device {}'.format(
-                        self.name))
+                logging.debug(f'Started decode process for device '
+                              f'{self.filename_root}')
             if self.capture_thread is None or not self.capture_thread.is_alive():
                 self.capture_thread = threading.Thread(
                         target=run_capture,
                         args=[self])
-                logging.debug('Starting capture thread for device {}'.format(
-                              self.name))
+                logging.debug(f'Starting capture thread for device '
+                              f'{self.filename_root}')
                 self.capture_thread.start()
-                logging.debug('Started capture thread for device {}'.format(
-                              self.name))
+                logging.debug(f'Started capture thread for device '
+                              f'{self.filename_root}')
 
     def stop(self):
         if self.is_connected():
+            ctrl = dai.CameraControl()
+            ctrl.setStopStreaming()
+            self.rgb_control_q.send(ctrl)
+            self.mono_control_q.send(ctrl)
+            time.sleep(1)
             self.capture_quit.set()
-            self.capture_thread.join()
             self.decode_quit.set()
-            while not self.display_q.empty():
-                self.display_q.get()
-            while self.decode_process.is_alive():
-                logging.debug('Waiting for decode thread to exit...')
-                self.decode_process.join(5)
-            logging.debug('Stopped processes for camera {}...'.format(
-                self.name))
-            # self.device.close()
+
+    def close(self):
+        if self.is_running():
+            self.stop()
+        while self.capture_thread.is_alive():
+            logging.info(f'Waiting for capture thread to exit for '
+                         f'device {self.filename_root}')
+            self.capture_thread.join(5)
+        while not self.display_q.empty():
+            self.display_q.get()
+        while self.decode_process.is_alive():
+            logging.info(f'Waiting for decode process to exit for '
+                         f'device {self.filename_root}')
+            self.decode_process.join(5)
+        logging.debug(f'Stopped processes for device {self.filename_root}')
 
     def select_left(self):
         with self.lock:
@@ -369,7 +313,7 @@ class Device():
 
     def enable_recording(self):
         if self.is_connected():
-            logging.info(f'Enabling recording for device {self.name}')
+            logging.info(f'Enabling recording for device {self.filename_root}')
             self.record_event.set()
 
     def disable_recording(self):
@@ -520,12 +464,7 @@ if __name__ == '__main__':
         logging.exception(e)
     finally:
         for d in devices:
-            # d['device'].disable_recording()
-            ctrl = dai.CameraControl()
-            ctrl.setStopStreaming()
-            d['device'].rgb_control_q.send(ctrl)
-            d['device'].mono_control_q.send(ctrl)
-        time.sleep(1)
-        for d in devices:
             d['device'].stop()
+        for d in devices:
+            d['device'].close()
     logging.info('Exiting...')
