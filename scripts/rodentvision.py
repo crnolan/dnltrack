@@ -12,6 +12,7 @@ import logging
 import sys
 import os
 from multiprocessing import Process, Value, Queue, Event
+import multiprocessing
 
 # Start CV2 window thread to display images
 # MUST BE DONE BEFORE AV IMPORT, SEE:
@@ -152,16 +153,14 @@ def open_container(name, codec, width, height, fps):
 def run_capture(device):
     '''Capture images from camera and add to the queue'''
 
-    logging.debug('Capture thread started for device {}'.format(device.name))
-    logging.info('Device {} starting with recording == {}'.format(
-        device.name, device.record_event.is_set()))
+    logging.debug(f'Capture thread started for device {device.filename_root}')
     device.start_pipeline()
     streams = device.device.getOutputQueueNames()
     # Open a container for each stream
     containers = {name: open_container(name, device.encodec, device.width,
                                        device.height, device.fps)
                   for name in streams}
-    logging.debug('Capture thread for device {} alive'.format(device.name))
+    logging.debug(f'Capture thread for device {device.filename_root} alive')
     write_count = {name: 0 for name in streams}
     capture_count = {name: 0 for name in streams}
 
@@ -169,7 +168,8 @@ def run_capture(device):
     treport = time.time()
     while not device.capture_quit.is_set():
         if time.time() - treport > 10:
-            logging.debug('Capture thread for device {} alive'.format(device.name))
+            logging.debug(f'Capture thread for device {device.filename_root} '
+                          f'alive')
             treport = time.time()
         for name in streams:
             message = device.capture_qs[name].tryGet()
@@ -181,8 +181,8 @@ def run_capture(device):
                 try:
                     device.decode_q.put(data, block=False)
                 except queue.Full:
-                    logging.debug('Decode queue full, showing reduced framerate')
-
+                    logging.debug('Decode queue full, showing reduced '
+                                  'framerate')
             if device.record_event.is_set():
                 if t0 == -1:
                     t0 = message.getTimestamp()
@@ -192,6 +192,7 @@ def run_capture(device):
                 packet.dts = ts // timedelta(microseconds=1)
                 containers[name].mux_one(packet)
                 write_count[name] += 1
+        time.sleep(0.001)
 
     device.device.close()
 
@@ -202,79 +203,31 @@ def run_capture(device):
 
 def run_decode(decode_q, display_q, quit_event, name, codec):
     '''Decode images and sent to display queue'''
+    logger = multiprocessing.get_logger()
+    # logger = logging.getLogger(__name__ + name + '_decode')
+    # fh = logging.FileHandler(f'{name}_decode_{time.time()}.log')
+    # fh.setLevel(logging.DEBUG)
+    # fh.setFormatter(logging.Formatter(
+    #     "%(asctime)s [%(levelname)s] %(name)s: %(message)s [%(threadName)s] "
+    # ))
+    # logger.addHandler(fh)
+    # logger.
     codec = av.CodecContext.create(codec, 'r')
+    decode_count = 0
     while not quit_event.is_set():
         try:
             data = decode_q.get(timeout=1)
             frames = codec.decode(av.Packet(data.copy()))
             if len(frames) > 0:
                 image = np.array(frames[0].to_image().convert('RGB'))
+                decode_count += 1
                 try:
                     display_q.put(image[:, :, ::-1], block=False)
                 except queue.Full:
-                    logging.info('Display queue full for {}'.format(name))
+                    logger.debug('Display queue full for {}'.format(name))
         except queue.Empty:
             pass
-
-
-class CameraCapture():
-    def __init__(self, device, decode_q, name, resolution, fps, encodec):
-        self.name = name
-        self.width = resolution[0]
-        self.height = resolution[1]
-        self.fps = fps
-        self.encodec = encodec
-        self.decode_q = decode_q
-        self.decode = threading.Event()
-        self.record = threading.Event()
-        self.capture_quit = threading.Event()
-        self.capture_process = threading.Thread(
-            target=run_capture,
-            args=(device, self.decode_q, self.capture_quit,
-                  self.decode, self.record, name,
-                  encodec, self.width, self.height, self.fps))
-
-    def start(self):
-        logging.debug('Starting capture process for camera {}...'.format(
-            self.name))
-        self.capture_process.start()
-        # while not (self.write_thread.is_alive() and
-        #            self.decode_thread.is_alive() and
-        #            self.capture_thread.is_alive()):
-        #     time.sleep(0.1)
-        logging.debug('Started capture process for camera {}...'.format(
-            self.name))
-
-    def enable_decoding(self):
-        logging.debug('Enable frame decoding for camera {}...'.format(
-            self.name
-        ))
-        self.decode.set()
-
-    def disable_decoding(self):
-        logging.debug('Disable frame decoding for camera {}...'.format(
-            self.name
-        ))
-        self.decode.clear()
-
-    def enable_recording(self):
-        logging.debug('Enable frame recording for camera {}...'.format(
-            self.name
-        ))
-        self.record.set()
-
-    def disable_recording(self):
-        logging.debug('Disable frame recording for camera {}...'.format(
-            self.name
-        ))
-        self.record.clear()
-
-    def stop(self):
-        logging.debug('Stopping processes for camera {}...'.format(
-            self.name))
-        self.capture_quit.set()
-        logging.debug('Waiting for capture thread to exit...')
-        self.capture_process.join()
+    logger.info(f'Decode count for device {name}: {decode_count}')
 
 
 def connect_thread(device):
@@ -372,7 +325,7 @@ class Device():
                 self.decode_process = Process(
                     target=run_decode,
                     args=(self.decode_q, self.display_q, self.decode_quit,
-                          self.name, self.decodec))
+                          self.filename_root, self.decodec))
                 logging.debug('Starting decode process for device {}'.format(
                         self.name))
                 self.decode_process.start()
@@ -428,12 +381,15 @@ class Device():
 
 
 if __name__ == '__main__':
-    log = logging.getLogger()
-    log.setLevel(logging.INFO)
-    log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s [%(threadName)s] ") # I am printing thread id here
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(log_formatter)
-    log.addHandler(console_handler)
+    # log = logging.getLogger()
+    # log.setLevel(logging.INFO)
+    # log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s [%(threadName)s] ") # I am printing thread id here
+    # console_handler = logging.StreamHandler()
+    # console_handler.setFormatter(log_formatter)
+    # log.addHandler(console_handler)
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s [%(threadName)s]')
+    multiprocessing.log_to_stderr()
 
     device_infos = dai.Device.getAllAvailableDevices()
     logging.info(f'Found {len(device_infos)} devices')
@@ -531,6 +487,7 @@ if __name__ == '__main__':
                         except queue.Empty:
                             pass
                 if changed:
+                    tchanged = time.time()
                     images = []
                     for d in devices:
                         image = d['image']
@@ -540,14 +497,19 @@ if __name__ == '__main__':
                             cv2.putText(image, 'Recording', (10, 60),
                                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                         images.append(image)
+                    tdraw = time.time()
                     disp_im = np.concatenate([np.concatenate([images[i] for i in row], axis=1)
                                               for row in image_grid], axis=0)
+                    tconcat = time.time()
                     _, _, winw, winh = cv2.getWindowImageRect('RodentVision')
                     w = min(winw, int(aspect * winh))
                     h = min(winh, int(winw / aspect))
                     disp_im = cv2.resize(disp_im, (w, h), interpolation=cv2.INTER_AREA)
                     cv2.resizeWindow('RodentVision', w, h)
                     cv2.imshow('RodentVision', disp_im)
+                    logging.debug(f'Time to draw == {tdraw - tchanged}, '
+                                  f'time to concat == {tconcat - tdraw}, '
+                                  f'time to display == {time.time() - tconcat}')
                 key = cv2.waitKey(1)
         except KeyboardInterrupt:
             cv2.destroyAllWindows()
@@ -559,5 +521,11 @@ if __name__ == '__main__':
     finally:
         for d in devices:
             # d['device'].disable_recording()
+            ctrl = dai.CameraControl()
+            ctrl.setStopStreaming()
+            d['device'].rgb_control_q.send(ctrl)
+            d['device'].mono_control_q.send(ctrl)
+        time.sleep(1)
+        for d in devices:
             d['device'].stop()
     logging.info('Exiting...')

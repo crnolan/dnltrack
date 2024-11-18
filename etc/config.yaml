@@ -2,4 +2,9 @@
 groups:
   box1:
     overhead:
-      ip: 169.254.1.222
+      ip: 169.254.1.240
+  box2:
+    overhead:
+      ip: 169.254.1.241
+fps: 30
+triggered: False
