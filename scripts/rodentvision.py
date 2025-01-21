@@ -29,14 +29,16 @@ if __name__ == '__main__':
 import av
 
 
-def create_pipeline(left_name, right_name, rgb_name, fps=None):
+def create_pipeline(left_name, right_name, rgb_name, fps, triggered=False):
 
-    def _camera_setup(pipeline, camera, name, fps=None):
-        if fps is None:
+    def _camera_setup(pipeline, camera, name, fps, triggered):
+        if triggered:
             camera.setFps(120)
             camera.initialControl.setExternalTrigger(1, 0)
         else:
             camera.setFps(fps)
+        logging.info(f'Setting autoexposure limit to {int(1/(8*fps) * 1e6)} us')
+        camera.initialControl.setAutoExposureLimit(int(1/(8*fps) * 1e6)) # microseconds
         record_xout = pipeline.create(dai.node.XLinkOut)
         record_xout.setStreamName(name)
         enc = pipeline.create(dai.node.VideoEncoder)
@@ -57,9 +59,9 @@ def create_pipeline(left_name, right_name, rgb_name, fps=None):
     rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
     rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
 
-    left_enc, left_record = _camera_setup(pipeline, left, left_name, fps)
-    right_enc, right_record = _camera_setup(pipeline, right, right_name, fps)
-    rgb_enc, rgb_record = _camera_setup(pipeline, rgb, rgb_name, fps)
+    left_enc, left_record = _camera_setup(pipeline, left, left_name, fps, triggered)
+    right_enc, right_record = _camera_setup(pipeline, right, right_name, fps, triggered)
+    rgb_enc, rgb_record = _camera_setup(pipeline, rgb, rgb_name, fps, triggered)
 
     left.out.link(left_enc.input)
     right.out.link(right_enc.input)
@@ -137,7 +139,7 @@ def run_capture(device):
     device.device.close()
 
     for name in streams:
-        logging.debug('Capture count for camera {}: {}'.format(name, capture_count[name]))
+        logging.info('Capture count for camera {}: {}'.format(name, capture_count[name]))
         logging.info('Write count for camera {}: {}'.format(name, write_count[name]))
 
 
@@ -176,12 +178,12 @@ def connect_thread(device):
     logging.info(f'Connected to {device.device_info.name}'
                  f' creating pipeline with triggered == {device.triggered}')
     if device.triggered:
-        pipeline, resolution = create_pipeline(*sn)
+        pipeline, resolution = create_pipeline(*sn, device.fps, True)
     else:
         logging.info(f'Creating pipeline with fps == {device.fps}')
-        pipeline, resolution = create_pipeline(*sn, device.fps)
+        pipeline, resolution = create_pipeline(*sn, device.fps, False)
         device.enable_recording()
-    hw_device.setIrFloodLightIntensity(0.1)
+    hw_device.setIrFloodLightIntensity(0.2)
 
     with device.lock:
         device.pipeline = pipeline
