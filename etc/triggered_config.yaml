@@ -1,0 +1,7 @@
+---
+groups:
+  box1:
+    overhead:
+      ip: 169.254.1.240
+fps: 30
+triggered: True

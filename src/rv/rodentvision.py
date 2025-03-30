@@ -77,6 +77,29 @@ def create_pipeline(left_name, right_name, rgb_name, fps, triggered=False):
     rgb_ctrl.setStreamName(rgb_name + '_ctrl')
     rgb_ctrl.out.link(rgb.inputControl)
 
+    # Soft trigger
+    xtrigger = pipeline.create(dai.node.XLinkIn)
+    xtrigger.setStreamName('trigger')
+    script = pipeline.create(dai.node.Script)
+    xtrigger.out.link(script.inputs['trigger'])
+    script.setScript("""
+    import GPIO
+    import time
+    GPIO_PIN=41 # Trigger
+
+    GPIO.setup(GPIO_PIN, GPIO.OUT, GPIO.PULL_DOWN)
+
+    def capture():
+        GPIO.write(GPIO_PIN, True)
+        time.sleep(0.001) # 1ms pulse is enough
+        GPIO.write(GPIO_PIN, False)
+
+    while True:
+        wait_for_trigger = node.io['trigger'].get()
+        capture()
+        node.warn('Trigger successful')
+    """)
+
     return pipeline, left.getResolutionSize()
 
 
@@ -92,29 +115,76 @@ def open_container(name, codec, width, height, fps):
     return output_container
 
 
-def run_capture(device):
+def run_capture(ip, filename_root,
+                triggered, encodec, fps,
+                quit_event, record_event, decode_q,
+                camera_select):
     '''Capture images from camera and add to the queue'''
+    logger = multiprocessing.get_logger()
+    logger.debug(f'Capture thread started for device {ip}')
 
-    logging.debug(f'Capture thread started for device {device.filename_root}')
-    device.start_pipeline()
-    streams = device.device.getOutputQueueNames()
+    # Find the camera in the list of available devices, poll every second
+    device_info = None
+    while not quit_event.is_set() and device_info is None:
+        device_infos = dai.Device.getAllAvailableDevices()
+        for di in device_infos:
+            if di.name == device.ip:
+                device_info = di
+                break
+        if device_info is None:
+            logger.info(f'Waiting for device {ip} to become available')
+            time.sleep(1)
+
+    if quit_event.is_set():
+        logger.info('Capture thread quitting')
+        return
+
+    logger.info(f'Connecting to {device_info.name}')
+    while device_info.state != dai.XLinkDeviceState.X_LINK_BOOTLOADER:
+        logger.info(f'Waiting for device {device_info.name} '
+                    f'to enter bootloader state')
+        time.sleep(1)
+    hw_device = dai.Device(device_info)
+    sn = [filename_root + s for s in ['_left', '_right', '_rgb']]
+    logger.debug(f'{sn}')
+    logger.info(f'Connected to {device_info.name}'
+                f' creating pipeline with triggered == {triggered}')
+    if triggered:
+        pipeline, (width, height) = create_pipeline(*sn, fps, True)
+    else:
+        logger.info(f'Creating pipeline with fps == {fps}')
+        pipeline, (width, height) = create_pipeline(*sn, fps, False)
+        record_event.set()
+    hw_device.setIrFloodLightIntensity(0.2)
+
+    hw_device.start_pipeline(pipeline)
+    mono_control_q = hw_device.getInputQueue(
+        filename_root + '_left_ctrl')
+    rgb_control_q = hw_device.getInputQueue(
+        filename_root + '_rgb_ctrl')
+    trigger_q = hw_device.getInputQueue('trigger')
+    streams = hw_device.getOutputQueueNames()
+    capture_qs = {
+        name: hw_device.getOutputQueue(name=name, maxSize=30, blocking=False)
+        for name in streams
+    }
     # Open a container for each stream
-    containers = {name: open_container(name, device.encodec, device.width,
-                                       device.height, device.fps)
+    containers = {name: open_container(name, encodec, width,
+                                       height, fps)
                   for name in streams}
-    logging.debug(f'Capture thread for device {device.filename_root} alive')
+    logger.debug(f'Capture process for device {filename_root} alive')
     write_count = {name: 0 for name in streams}
     capture_count = {name: 0 for name in streams}
 
     t0 = -1
     treport = time.time()
-    while not device.capture_quit.is_set():
+    while not quit_event.is_set():
         if time.time() - treport > 10:
-            logging.debug(f'Capture thread for device {device.filename_root} '
-                          f'alive')
+            logger.debug(f'Capture process for device {filename_root} '
+                         f'alive')
             treport = time.time()
         for name in streams:
-            message = device.capture_qs[name].tryGet()
+            message = capture_qs[name].tryGet()
             if message is None:
                 continue
             data = message.getData()
@@ -123,8 +193,8 @@ def run_capture(device):
                 try:
                     device.decode_q.put(data, block=False)
                 except queue.Full:
-                    logging.debug('Decode queue full, showing reduced '
-                                  'framerate')
+                    logger.debug('Decode queue full, showing reduced '
+                                 'framerate')
             if device.record_event.is_set():
                 if t0 == -1:
                     t0 = message.getTimestamp()
@@ -136,11 +206,11 @@ def run_capture(device):
                 write_count[name] += 1
         time.sleep(0.001)
 
-    device.device.close()
+    hw_device.close()
 
     for name in streams:
-        logging.info('Capture count for camera {}: {}'.format(name, capture_count[name]))
-        logging.info('Write count for camera {}: {}'.format(name, write_count[name]))
+        logger.info('Capture count for camera {}: {}'.format(name, capture_count[name]))
+        logger.info('Write count for camera {}: {}'.format(name, write_count[name]))
 
 
 def run_decode(decode_q, display_q, quit_event, name, codec):
@@ -193,9 +263,10 @@ def connect_thread(device):
 
 
 class Device():
-    def __init__(self, name, device_info, group, fps, triggered):
+    def __init__(self, ip, name, group, fps, triggered):
+        self.ip = ip
         self.name = name
-        self.device_info = device_info
+        # self.device_info = device_info
         self.group = group
         self.encodec = 'h264'
         self.decodec = 'h264'
@@ -210,6 +281,7 @@ class Device():
         self.filename_root = f'group-{group}_camera-{name}'
         self.rgb_control_q = None
         self.mono_control_q = None
+        self.trigger_q = None
         self.camera_select = 'rgb'
         self.decode_quit = Event()
         self.decode_q = Queue(maxsize=1)
@@ -251,6 +323,7 @@ class Device():
                     self.filename_root + '_left_ctrl')
                 self.rgb_control_q = self.device.getInputQueue(
                     self.filename_root + '_rgb_ctrl')
+                self.trigger_q = self.device.getInputQueue('trigger')
                 for name in self.device.getOutputQueueNames():
                     self.capture_qs[name] = self.device.getOutputQueue(
                         name=name, maxSize=30, blocking=False)
@@ -314,6 +387,14 @@ class Device():
         with self.lock:
             self.camera_select = 'rgb'
 
+    def trigger(self):
+        if not self.is_running():
+            return
+        with self.lock:
+            buffer = dai.Buffer()
+            buffer.setData([1])
+            self.trigger_q.send(buffer)
+
     def enable_recording(self):
         if self.is_connected():
             logging.info(f'Enabling recording for device {self.filename_root}')
@@ -327,13 +408,23 @@ class Device():
         return self.record_event.is_set()
 
 
+def device_process(ip, name, group, fps, triggered):
+
+
+
+class DeviceProxy():
+    def __init__(self, name, group, fps, triggered):
+        self.name = name
+        self.group = group
+        self.fps = fps
+        self.triggered = triggered
+        self.device_process =
+        self.device = None
+
+
+
+
 if __name__ == '__main__':
-    # log = logging.getLogger()
-    # log.setLevel(logging.INFO)
-    # log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s [%(threadName)s] ") # I am printing thread id here
-    # console_handler = logging.StreamHandler()
-    # console_handler.setFormatter(log_formatter)
-    # log.addHandler(console_handler)
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s [%(threadName)s]')
     multiprocessing.log_to_stderr()
@@ -366,14 +457,6 @@ if __name__ == '__main__':
     try:
         for name, cameras in config['groups'].items():
             for camera, details in cameras.items():
-                # Find the camera in the list of available devices
-                device_info = None
-                for di in device_infos:
-                    if di.name == details['ip']:
-                        device_info = di
-                        break
-                if device_info is None:
-                    raise ValueError(f'Could not find device with IP {details["ip"]}')
                 device = Device(camera, device_info, name,
                                 config['fps'], config['triggered'])
                 device.connect()

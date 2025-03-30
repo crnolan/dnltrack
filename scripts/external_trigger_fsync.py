@@ -8,9 +8,9 @@ pipeline = dai.Pipeline()
 camRgb = pipeline.create(dai.node.ColorCamera)
 camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
 camRgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
-camRgb.setIspScale(1, 2)
+# camRgb.setIspScale(1, 2)
 camRgb.initialControl.setFrameSyncMode(dai.CameraControl.FrameSyncMode.INPUT)
-camRgb.setFps(60)
+camRgb.setFps(120)
 camRgb.initialControl.setExternalTrigger(1, 0)
 
 xoutRgb = pipeline.create(dai.node.XLinkOut)
@@ -18,29 +18,31 @@ xoutRgb.setStreamName("color")
 camRgb.isp.link(xoutRgb.input)
 
 monoLeft = pipeline.create(dai.node.MonoCamera)
-monoLeft.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+monoLeft.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
 monoLeft.setBoardSocket(dai.CameraBoardSocket.CAM_B)
 monoLeft.initialControl.setFrameSyncMode(dai.CameraControl.FrameSyncMode.INPUT)
+monoLeft.setFps(120)
 monoLeft.initialControl.setExternalTrigger(1, 0)
 
-# xoutLeft = pipeline.create(dai.node.XLinkOut)
-# xoutLeft.setStreamName("left")
-# monoLeft.out.link(xoutLeft.input)
+xoutLeft = pipeline.create(dai.node.XLinkOut)
+xoutLeft.setStreamName("left")
+monoLeft.out.link(xoutLeft.input)
 
-monoRight = pipeline.createMonoCamera()
-monoRight.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+monoRight = pipeline.create(dai.node.MonoCamera)
+monoRight.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
 monoRight.setBoardSocket(dai.CameraBoardSocket.CAM_C)
 monoRight.initialControl.setFrameSyncMode(dai.CameraControl.FrameSyncMode.INPUT)
+monoRight.setFps(120)
 monoRight.initialControl.setExternalTrigger(1, 0)
 
-# xoutRight = pipeline.create(dai.node.XLinkOut)
-# xoutRight.setStreamName("right")
-# monoRight.out.link(xoutRight.input)
+xoutRight = pipeline.create(dai.node.XLinkOut)
+xoutRight.setStreamName("right")
+monoRight.out.link(xoutRight.input)
 
 # Connect to device with pipeline
 with dai.Device(pipeline) as device:
-    # arr = ['left', 'right', 'color']
-    arr = ['color']
+    arr = ['left', 'right', 'color']
+    # arr = ['color']
     queues = {}
     frames = {}
 
