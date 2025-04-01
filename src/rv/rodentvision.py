@@ -380,6 +380,13 @@ class DeviceProxy():
         return self.record_event.is_set()
 
 
+def tile_images(devices, image_grid, width, height):
+    images = [[devices[i]['image'] if i >= 0 else np.zeros((height, width, 3))
+                for i in row]
+                for row in image_grid]
+    return np.concatenate([np.concatenate(row, axis=1) for row in images], axis=0)
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s [%(threadName)s]')
@@ -430,12 +437,6 @@ if __name__ == '__main__':
     image_grid = np.arange(grid_w * grid_h)
     image_grid[n_streams:] = -1
     image_grid = image_grid.reshape((grid_h, grid_w))
-
-    def tile_images(devices, image_grid, width, height):
-        images = [[devices[i]['image'] if i >= 0 else np.zeros((height, width, 3))
-                   for i in row]
-                  for row in image_grid]
-        return np.concatenate([np.concatenate(row, axis=1) for row in images], axis=0)
 
     disp_im = tile_images(devices, image_grid, width, height)
     # disp_im = np.concatenate([np.concatenate([devices[i]['image'] for i in row], axis=1)
