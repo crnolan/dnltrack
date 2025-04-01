@@ -336,6 +336,8 @@ class DeviceProxy():
     def stop(self):
         self.capture_quit.set()
         self.decode_quit.set()
+
+    def wait_for_exit(self):
         while (self.capture_process is not None
                and self.capture_process.is_alive()):
             logging.info(f'Waiting for capture thread to exit for '
@@ -428,8 +430,16 @@ if __name__ == '__main__':
     image_grid = np.arange(grid_w * grid_h)
     image_grid[n_streams:] = -1
     image_grid = image_grid.reshape((grid_h, grid_w))
-    disp_im = np.concatenate([np.concatenate([devices[i]['image'] for i in row], axis=1)
-                              for row in image_grid], axis=0)
+
+    def tile_images(devices, image_grid, width, height):
+        images = [[devices[i]['image'] if i >= 0 else np.zeros((height, width, 3))
+                   for i in row]
+                  for row in image_grid]
+        return np.concatenate([np.concatenate(row, axis=1) for row in images], axis=0)
+
+    disp_im = tile_images(devices, image_grid, width, height)
+    # disp_im = np.concatenate([np.concatenate([devices[i]['image'] for i in row], axis=1)
+    #                           for row in image_grid], axis=0)
     _, _, winw, winh = cv2.getWindowImageRect('RodentVision')
     w = min(winw, int(aspect * winh))
     h = min(winh, int(winw / aspect))
@@ -529,8 +539,9 @@ if __name__ == '__main__':
                                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                     images.append(image)
                 tdraw = time.time()
-                disp_im = np.concatenate([np.concatenate([images[i] for i in row], axis=1)
-                                            for row in image_grid], axis=0)
+                disp_im = tile_images(devices, image_grid, width, height)
+                # disp_im = np.concatenate([np.concatenate([images[i] for i in row], axis=1)
+                #                           for row in image_grid], axis=0)
                 tconcat = time.time()
                 _, _, winw, winh = cv2.getWindowImageRect('RodentVision')
                 w = min(winw, int(aspect * winh))
@@ -539,8 +550,8 @@ if __name__ == '__main__':
                 cv2.resizeWindow('RodentVision', w, h)
                 cv2.imshow('RodentVision', disp_im)
                 logging.debug(f'Time to draw == {tdraw - tchanged}, '
-                                f'time to concat == {tconcat - tdraw}, '
-                                f'time to display == {time.time() - tconcat}')
+                              f'time to concat == {tconcat - tdraw}, '
+                              f'time to display == {time.time() - tconcat}')
             key = cv2.waitKey(1)
     except KeyboardInterrupt:
         cv2.destroyAllWindows()
@@ -549,4 +560,6 @@ if __name__ == '__main__':
     finally:
         for d in devices:
             d['device'].stop()
+        for d in devices:
+            d['device'].wait_for_exit()
     logging.info('Exiting...')
