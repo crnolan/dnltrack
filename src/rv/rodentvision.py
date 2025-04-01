@@ -28,6 +28,12 @@ if __name__ == '__main__':
 
 import av
 
+camera_map = {
+    0: 'rgb',
+    1: 'left',
+    2: 'right'
+}
+
 
 def create_pipeline(left_name, right_name, rgb_name, fps, triggered=False):
 
@@ -118,7 +124,8 @@ def open_container(name, codec, width, height, fps):
 def run_capture(ip, filename_root,
                 triggered, encodec, fps,
                 quit_event, record_event, decode_q,
-                camera_select):
+                camera_select, trigger_event,
+                device_state):
     '''Capture images from camera and add to the queue'''
     logger = multiprocessing.get_logger()
     logger.debug(f'Capture thread started for device {ip}')
@@ -128,11 +135,12 @@ def run_capture(ip, filename_root,
     while not quit_event.is_set() and device_info is None:
         device_infos = dai.Device.getAllAvailableDevices()
         for di in device_infos:
-            if di.name == device.ip:
+            if di.name == ip:
                 device_info = di
                 break
         if device_info is None:
             logger.info(f'Waiting for device {ip} to become available')
+            device_state.value = 0
             time.sleep(1)
 
     if quit_event.is_set():
@@ -140,6 +148,7 @@ def run_capture(ip, filename_root,
         return
 
     logger.info(f'Connecting to {device_info.name}')
+    device_state.value = 1
     while device_info.state != dai.XLinkDeviceState.X_LINK_BOOTLOADER:
         logger.info(f'Waiting for device {device_info.name} '
                     f'to enter bootloader state')
@@ -149,6 +158,7 @@ def run_capture(ip, filename_root,
     logger.debug(f'{sn}')
     logger.info(f'Connected to {device_info.name}'
                 f' creating pipeline with triggered == {triggered}')
+    device_state.value = 2
     if triggered:
         pipeline, (width, height) = create_pipeline(*sn, fps, True)
     else:
@@ -157,7 +167,7 @@ def run_capture(ip, filename_root,
         record_event.set()
     hw_device.setIrFloodLightIntensity(0.2)
 
-    hw_device.start_pipeline(pipeline)
+    hw_device.startPipeline(pipeline)
     mono_control_q = hw_device.getInputQueue(
         filename_root + '_left_ctrl')
     rgb_control_q = hw_device.getInputQueue(
@@ -178,24 +188,32 @@ def run_capture(ip, filename_root,
 
     t0 = -1
     treport = time.time()
+    device_state.value = 3
     while not quit_event.is_set():
         if time.time() - treport > 10:
             logger.debug(f'Capture process for device {filename_root} '
                          f'alive')
             treport = time.time()
+
+        if trigger_event.is_set():
+            buffer = dai.Buffer()
+            buffer.setData([1])
+            trigger_q.send(buffer)
+            trigger_event.clear()
+
         for name in streams:
             message = capture_qs[name].tryGet()
             if message is None:
                 continue
             data = message.getData()
             capture_count[name] += 1
-            if device.camera_select == name.split('_')[-1]:
+            if camera_map[camera_select.value] == name.split('_')[-1]:
                 try:
-                    device.decode_q.put(data, block=False)
+                    decode_q.put(data, block=False)
                 except queue.Full:
                     logger.debug('Decode queue full, showing reduced '
                                  'framerate')
-            if device.record_event.is_set():
+            if record_event.is_set():
                 if t0 == -1:
                     t0 = message.getTimestamp()
                 ts = message.getTimestamp() - t0
@@ -206,6 +224,31 @@ def run_capture(ip, filename_root,
                 write_count[name] += 1
         time.sleep(0.001)
 
+    if not triggered and record_event.is_set():
+        logger.info('Stopping camera streaming')
+        ctrl = dai.CameraControl()
+        ctrl.setStopStreaming()
+        rgb_control_q.send(ctrl)
+        mono_control_q.send(ctrl)
+
+    if record_event.is_set():
+        logger.info('Writing remaining packets')
+        for name in streams:
+            message = capture_qs[name].tryGet()
+            while message is not None:
+                data = message.getData()
+                capture_count[name] += 1
+                if t0 == -1:
+                    t0 = message.getTimestamp()
+                ts = message.getTimestamp() - t0
+                packet = av.Packet(data)
+                packet.pts = ts // timedelta(microseconds=1)
+                packet.dts = ts // timedelta(microseconds=1)
+                containers[name].mux_one(packet)
+                write_count[name] += 1
+                message = capture_qs[name].tryGet()
+
+    logger.info(f'Closing device {filename_root}')
     hw_device.close()
 
     for name in streams:
@@ -234,194 +277,105 @@ def run_decode(decode_q, display_q, quit_event, name, codec):
     logger.info(f'Decode count for device {name}: {decode_count}')
 
 
-def connect_thread(device):
-    logging.info(f'Connecting to {device.device_info.name}')
-    while device.device_info.state != dai.XLinkDeviceState.X_LINK_BOOTLOADER:
-        logging.info(f'Waiting for device {device.device_info.name} '
-                     f'to enter bootloader state')
-        time.sleep(1)
-    hw_device = dai.Device(device.device_info)
-    with device.lock:
-        device.device = hw_device
-    sn = [device.filename_root + s for s in ['_left', '_right', '_rgb']]
-    logging.debug(f'{sn}')
-    logging.info(f'Connected to {device.device_info.name}'
-                 f' creating pipeline with triggered == {device.triggered}')
-    if device.triggered:
-        pipeline, resolution = create_pipeline(*sn, device.fps, True)
-    else:
-        logging.info(f'Creating pipeline with fps == {device.fps}')
-        pipeline, resolution = create_pipeline(*sn, device.fps, False)
-        device.enable_recording()
-    hw_device.setIrFloodLightIntensity(0.2)
-
-    with device.lock:
-        device.pipeline = pipeline
-        device.width = resolution[0]
-        device.height = resolution[1]
-    device.start()
-
-
-class Device():
-    def __init__(self, ip, name, group, fps, triggered):
+class DeviceProxy():
+    def __init__(self, ip, group, name, fps, width, height, triggered):
         self.ip = ip
-        self.name = name
-        # self.device_info = device_info
         self.group = group
+        self.name = name
+        self.fps = fps
+        self.width = width
+        self.height = height
+        self.triggered = triggered
         self.encodec = 'h264'
         self.decodec = 'h264'
-        self.pipeline = None
-        self.connect_thread = None
-        self.device = None
-        self.width = None
-        self.height = None
-        self.fps = fps
-        self.triggered = triggered
-        self.lock = threading.Lock()
         self.filename_root = f'group-{group}_camera-{name}'
-        self.rgb_control_q = None
-        self.mono_control_q = None
-        self.trigger_q = None
-        self.camera_select = 'rgb'
+        self.camera_select = Value('B', 0)
         self.decode_quit = Event()
         self.decode_q = Queue(maxsize=1)
         self.display_q = Queue(maxsize=1)
-        self.record_event = threading.Event()
-        self.capture_quit = threading.Event()
-        self.connect_thread = None
+        self.record_event = Event()
+        self.capture_quit = Event()
+        self.trigger_event = Event()
         self.decode_process = None
-        self.capture_thread = None
-        self.capture_qs = {}
-
-    def connect(self):
-        if self.device is not None or self.connect_thread is not None:
-            return
-        self.connect_thread = threading.Thread(
-            target=connect_thread, args=[self], daemon=True)
-        self.connect_thread.start()
-
-    def is_connecting(self):
-        return self.connect_thread is not None and self.device is None
-
-    def is_connected(self):
-        return self.device is not None
-
-    def is_running(self):
-        if not self.is_connected():
-            return False
-        if self.device.isClosed():
-            return False
-        if self.device.isPipelineRunning():
-            return True
-        return False
-
-    def start_pipeline(self):
-        if self.is_connected() and not self.is_running():
-            self.device.startPipeline(self.pipeline)
-            with self.lock:
-                self.mono_control_q = self.device.getInputQueue(
-                    self.filename_root + '_left_ctrl')
-                self.rgb_control_q = self.device.getInputQueue(
-                    self.filename_root + '_rgb_ctrl')
-                self.trigger_q = self.device.getInputQueue('trigger')
-                for name in self.device.getOutputQueueNames():
-                    self.capture_qs[name] = self.device.getOutputQueue(
-                        name=name, maxSize=30, blocking=False)
+        self.capture_process = None
+        self.device_state = Value('b', -1)
 
     def start(self):
-        if self.is_connected() and not self.is_running():
-            if self.decode_process is None or not self.decode_process.is_alive():
-                self.decode_process = Process(
-                    target=run_decode,
-                    args=(self.decode_q, self.display_q, self.decode_quit,
-                          self.filename_root, self.decodec))
-                logging.debug(f'Starting decode process for device '
-                              f'{self.filename_root}')
-                self.decode_process.start()
-                logging.debug(f'Started decode process for device '
-                              f'{self.filename_root}')
-            if self.capture_thread is None or not self.capture_thread.is_alive():
-                self.capture_thread = threading.Thread(
-                        target=run_capture,
-                        args=[self])
-                logging.debug(f'Starting capture thread for device '
-                              f'{self.filename_root}')
-                self.capture_thread.start()
-                logging.debug(f'Started capture thread for device '
-                              f'{self.filename_root}')
+        if not self.is_decode_alive():
+            self.decode_process = Process(
+                target=run_decode,
+                args=(self.decode_q, self.display_q, self.decode_quit,
+                      self.filename_root, self.decodec))
+            logging.debug(f'Starting decode process for device '
+                          f'{self.filename_root}')
+            self.decode_process.start()
+            logging.debug(f'Started decode process for device '
+                          f'{self.filename_root}')
+        if not self.is_capture_alive():
+            self.capture_process = Process(
+                target=run_capture,
+                args=[self.ip, self.filename_root,
+                      self.triggered, self.encodec, self.fps,
+                      self.capture_quit, self.record_event, self.decode_q,
+                      self.camera_select, self.trigger_event,
+                      self.device_state])
+            logging.debug(f'Starting capture thread for device '
+                          f'{self.filename_root}')
+            self.capture_process.start()
+            logging.debug(f'Started capture thread for device '
+                          f'{self.filename_root}')
+
+    def is_capture_alive(self):
+        return (self.capture_process is not None
+                and self.capture_process.is_alive())
+
+    def is_decode_alive(self):
+        return (self.decode_process is not None
+                and self.decode_process.is_alive())
 
     def stop(self):
-        if self.is_connected():
-            ctrl = dai.CameraControl()
-            ctrl.setStopStreaming()
-            self.rgb_control_q.send(ctrl)
-            self.mono_control_q.send(ctrl)
-            time.sleep(1)
-            self.capture_quit.set()
-            self.decode_quit.set()
-
-    def close(self):
-        if self.is_running():
-            self.stop()
-        while self.capture_thread.is_alive():
+        self.capture_quit.set()
+        self.decode_quit.set()
+        while (self.capture_process is not None
+               and self.capture_process.is_alive()):
             logging.info(f'Waiting for capture thread to exit for '
                          f'device {self.filename_root}')
-            self.capture_thread.join(5)
+            self.capture_process.join(5)
         while not self.display_q.empty():
             self.display_q.get()
-        while self.decode_process.is_alive():
+        while (self.decode_process is not None
+               and self.decode_process.is_alive()):
             logging.info(f'Waiting for decode process to exit for '
                          f'device {self.filename_root}')
             self.decode_process.join(5)
         logging.debug(f'Stopped processes for device {self.filename_root}')
 
-    def select_left(self):
-        with self.lock:
-            self.camera_select = 'left'
+    def get_device_state(self):
+        return self.device_state.value
 
-    def select_right(self):
-        with self.lock:
-            self.camera_select = 'right'
+    def is_connected(self):
+        return self.device_state.value == 3
 
-    def select_rgb(self):
-        with self.lock:
-            self.camera_select = 'rgb'
+    def select_camera(self, value):
+        self.camera_select.value = value
+
+    def get_selected_camera(self):
+        return self.camera_select.value
 
     def trigger(self):
-        if not self.is_running():
-            return
-        with self.lock:
-            buffer = dai.Buffer()
-            buffer.setData([1])
-            self.trigger_q.send(buffer)
+        if self.trigger_event.is_set():
+            logging.debug(f'Trigger event already set for device {self.filename_root}')
+        self.trigger_event.set()
 
     def enable_recording(self):
-        if self.is_connected():
-            logging.info(f'Enabling recording for device {self.filename_root}')
-            self.record_event.set()
+        logging.info(f'Enabling recording for device {self.filename_root}')
+        self.record_event.set()
 
     def disable_recording(self):
-        if self.is_connected():
-            self.record_event.clear()
+        self.record_event.clear()
 
     def is_recording(self):
         return self.record_event.is_set()
-
-
-def device_process(ip, name, group, fps, triggered):
-
-
-
-class DeviceProxy():
-    def __init__(self, name, group, fps, triggered):
-        self.name = name
-        self.group = group
-        self.fps = fps
-        self.triggered = triggered
-        self.device_process =
-        self.device = None
-
-
 
 
 if __name__ == '__main__':
@@ -453,104 +407,146 @@ if __name__ == '__main__':
     else:
         print(f'Triggered == {config["triggered"]}')
 
+    width = 1280
+    height = 800
     devices = []
+    for group_name, cameras in config['groups'].items():
+        for camera_name, details in cameras.items():
+            devices.append({
+                'device': DeviceProxy(details['ip'], group_name, camera_name,
+                                      config['fps'], width, height,
+                                      config['triggered']),
+                'last_state': -2,
+                'image': np.zeros((800, 1280, 3))
+            })
+
+    key = None
+    n_streams = len(devices)
+    grid_w = int(np.ceil(np.sqrt(n_streams)))
+    grid_h = int(np.ceil(n_streams / grid_w))
+    aspect = (1280*grid_w)/(800*grid_h)
+    image_grid = np.arange(grid_w * grid_h)
+    image_grid[n_streams:] = -1
+    image_grid = image_grid.reshape((grid_h, grid_w))
+    disp_im = np.concatenate([np.concatenate([devices[i]['image'] for i in row], axis=1)
+                              for row in image_grid], axis=0)
+    _, _, winw, winh = cv2.getWindowImageRect('RodentVision')
+    w = min(winw, int(aspect * winh))
+    h = min(winh, int(winw / aspect))
+    disp_im = cv2.resize(disp_im, (w, h), interpolation=cv2.INTER_AREA)
+    cv2.resizeWindow('RodentVision', w, h)
+    cv2.imshow('RodentVision', disp_im)
+
     try:
-        for name, cameras in config['groups'].items():
-            for camera, details in cameras.items():
-                device = Device(camera, device_info, name,
-                                config['fps'], config['triggered'])
-                device.connect()
-                devices.append({
-                    'group': name,
-                    'camera': camera,
-                    'device': device,
-                    'image': np.zeros((800, 1280, 3))
-                })
-
         key = None
-        n_streams = len(devices)
-        grid_w = int(np.ceil(np.sqrt(n_streams)))
-        grid_h = int(np.ceil(n_streams / grid_w))
-        aspect = (1280*grid_w)/(800*grid_h)
-        image_grid = np.arange(grid_w * grid_h)
-        image_grid[n_streams:] = -1
-        image_grid = image_grid.reshape((grid_h, grid_w))
-        disp_im = np.concatenate([np.concatenate([devices[i]['image'] for i in row], axis=1)
-                                  for row in image_grid], axis=0)
-        _, _, winw, winh = cv2.getWindowImageRect('RodentVision')
-        w = min(winw, int(aspect * winh))
-        h = min(winh, int(winw / aspect))
-        disp_im = cv2.resize(disp_im, (w, h), interpolation=cv2.INTER_AREA)
-        cv2.resizeWindow('RodentVision', w, h)
-        cv2.imshow('RodentVision', disp_im)
-
-        try:
-            key = None
-            recording = False
-            while True:
-                changed = False
-                if key == ord('q'):
-                    raise KeyboardInterrupt()
-                elif key == ord('0'):
-                    for d in devices:
-                        d['device'].select_rgb()
-                elif key == ord('1'):
-                    for d in devices:
-                        d['device'].select_left()
-                elif key == ord('2'):
-                    for d in devices:
-                        d['device'].select_right()
-                elif key == ord('r') and d['device'].triggered:
-                    for d in devices:
-                        d['device'].enable_recording()
-                    changed = True
-                elif key == ord('s') and d['device'].triggered:
-                    for d in devices:
-                        d['device'].disable_recording()
-                    changed = True
+        recording = not config['triggered']
+        while True:
+            changed = False
+            if key == ord('q'):
+                raise KeyboardInterrupt()
+            elif key == ord('0'):
                 for d in devices:
-                    if d['device'].is_connected():
-                        try:
-                            frame = d['device'].display_q.get_nowait()
-                            d['image'] = frame
-                            changed = True
-                        except queue.Empty:
-                            pass
-                if changed:
-                    tchanged = time.time()
-                    images = []
+                    d['device'].select_camera(0)
+            elif key == ord('1'):
+                for d in devices:
+                    d['device'].select_camera(1)
+            elif key == ord('2'):
+                for d in devices:
+                    d['device'].select_camera(2)
+            elif key == ord(' '):
+                if not recording:
                     for d in devices:
-                        image = d['image']
-                        cv2.putText(image, f'{d["group"]}-{d["camera"]}', (10, 30),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                        if d['device'].is_recording():
-                            cv2.putText(image, 'Recording', (10, 60),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                        images.append(image)
-                    tdraw = time.time()
-                    disp_im = np.concatenate([np.concatenate([images[i] for i in row], axis=1)
-                                              for row in image_grid], axis=0)
-                    tconcat = time.time()
-                    _, _, winw, winh = cv2.getWindowImageRect('RodentVision')
-                    w = min(winw, int(aspect * winh))
-                    h = min(winh, int(winw / aspect))
-                    disp_im = cv2.resize(disp_im, (w, h), interpolation=cv2.INTER_AREA)
-                    cv2.resizeWindow('RodentVision', w, h)
-                    cv2.imshow('RodentVision', disp_im)
-                    logging.debug(f'Time to draw == {tdraw - tchanged}, '
-                                  f'time to concat == {tconcat - tdraw}, '
-                                  f'time to display == {time.time() - tconcat}')
-                key = cv2.waitKey(1)
-        except KeyboardInterrupt:
-            cv2.destroyAllWindows()
-        except Exception as e:
-            logging.error(e)
-
+                        d['device'].trigger()
+            elif key == ord('r'):
+                recording = True
+                for d in devices:
+                    if d['device'].triggered:
+                        d['device'].enable_recording()
+                changed = True
+            elif key == ord('s'):
+                recording = False
+                for d in devices:
+                    if d['device'].triggered:
+                        d['device'].disable_recording()
+                changed = True
+            for d in devices:
+                device_state = d['device'].get_device_state()
+                if device_state != d['last_state']:
+                    d['last_state'] = device_state
+                    if device_state == -1:
+                        d['device'].start()
+                        logging.info(f'Starting process for {d["device"].filename_root}')
+                        image = np.zeros((800, 1280, 3))
+                        cv2.putText(image, 'Initialising', (10, 60),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1,
+                                    (255, 255, 255), 2)
+                        d['image'] = image
+                    if d['last_state'] == 0:
+                        logging.info(f'Device {d["device"].filename_root} not connected')
+                        image = np.zeros((800, 1280, 3))
+                        cv2.putText(image, 'Device not found', (10, 60),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1,
+                                    (255, 255, 255), 2)
+                        d['image'] = image
+                    elif d['last_state'] == 1:
+                        logging.info(f'Device {d["device"].filename_root} in bootloader')
+                        image = np.zeros((800, 1280, 3))
+                        cv2.putText(image, 'Waiting to connect', (10, 60),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1,
+                                    (255, 255, 255), 2)
+                        d['image'] = image
+                    elif d['last_state'] == 2:
+                        logging.info(f'Device {d["device"].filename_root} starting')
+                        image = np.zeros((800, 1280, 3))
+                        cv2.putText(image, 'Starting...', (10, 60),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1,
+                                    (255, 255, 255), 2)
+                        d['image'] = image
+                    elif d['last_state'] == 3:
+                        logging.info(f'Device {d["device"].filename_root} connected')
+                        image = np.zeros((800, 1280, 3))
+                        cv2.putText(image, 'Connected', (10, 60),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1,
+                                    (255, 255, 255), 2)
+                        d['image'] = image
+                    changed = True
+                if d['device'].is_connected():
+                    try:
+                        frame = d['device'].display_q.get_nowait()
+                        d['image'] = frame
+                        changed = True
+                    except queue.Empty:
+                        pass
+            if changed:
+                tchanged = time.time()
+                images = []
+                for d in devices:
+                    image = d['image']
+                    cv2.putText(image, f'{d["device"].group}-{d["device"].name}', (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    if d['device'].is_recording():
+                        cv2.putText(image, 'Recording', (10, 60),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    images.append(image)
+                tdraw = time.time()
+                disp_im = np.concatenate([np.concatenate([images[i] for i in row], axis=1)
+                                            for row in image_grid], axis=0)
+                tconcat = time.time()
+                _, _, winw, winh = cv2.getWindowImageRect('RodentVision')
+                w = min(winw, int(aspect * winh))
+                h = min(winh, int(winw / aspect))
+                disp_im = cv2.resize(disp_im, (w, h), interpolation=cv2.INTER_AREA)
+                cv2.resizeWindow('RodentVision', w, h)
+                cv2.imshow('RodentVision', disp_im)
+                logging.debug(f'Time to draw == {tdraw - tchanged}, '
+                                f'time to concat == {tconcat - tdraw}, '
+                                f'time to display == {time.time() - tconcat}')
+            key = cv2.waitKey(1)
+    except KeyboardInterrupt:
+        cv2.destroyAllWindows()
     except Exception as e:
-        logging.exception(e)
+        logging.error(e)
     finally:
         for d in devices:
             d['device'].stop()
-        for d in devices:
-            d['device'].close()
     logging.info('Exiting...')
