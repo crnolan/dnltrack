@@ -305,7 +305,8 @@ class DeviceProxy():
             self.decode_process = Process(
                 target=run_decode,
                 args=(self.decode_q, self.display_q, self.decode_quit,
-                      self.filename_root, self.decodec))
+                      self.filename_root, self.decodec),
+                daemon=True)
             logging.debug(f'Starting decode process for device '
                           f'{self.filename_root}')
             self.decode_process.start()
@@ -318,7 +319,8 @@ class DeviceProxy():
                       self.triggered, self.encodec, self.fps,
                       self.capture_quit, self.record_event, self.decode_q,
                       self.camera_select, self.trigger_event,
-                      self.device_state])
+                      self.device_state],
+                daemon=True)
             logging.debug(f'Starting capture thread for device '
                           f'{self.filename_root}')
             self.capture_process.start()
@@ -381,7 +383,7 @@ class DeviceProxy():
 
 
 def tile_images(devices, image_grid, width, height):
-    images = [[devices[i]['image'] if i >= 0 else np.zeros((height, width, 3))
+    images = [[devices[i]['image'] if i >= 0 else np.zeros((height, width, 3), dtype=np.uint8)
                 for i in row]
                 for row in image_grid]
     return np.concatenate([np.concatenate(row, axis=1) for row in images], axis=0)
@@ -418,6 +420,10 @@ if __name__ == '__main__':
 
     width = 1280
     height = 800
+
+    def blank_image():
+        return np.zeros((height, width, 3), dtype=np.uint8)
+    
     devices = []
     for group_name, cameras in config['groups'].items():
         for camera_name, details in cameras.items():
@@ -426,7 +432,7 @@ if __name__ == '__main__':
                                       config['fps'], width, height,
                                       config['triggered']),
                 'last_state': -2,
-                'image': np.zeros((800, 1280, 3))
+                'image': blank_image()
             })
 
     key = None
@@ -439,11 +445,13 @@ if __name__ == '__main__':
     image_grid = image_grid.reshape((grid_h, grid_w))
 
     disp_im = tile_images(devices, image_grid, width, height)
+    logging.info(f'disp_im dims: {disp_im.shape} and dtype: {disp_im.dtype}')
     # disp_im = np.concatenate([np.concatenate([devices[i]['image'] for i in row], axis=1)
     #                           for row in image_grid], axis=0)
     _, _, winw, winh = cv2.getWindowImageRect('RodentVision')
     w = min(winw, int(aspect * winh))
     h = min(winh, int(winw / aspect))
+    logging.info(f'width {w} and height {h}')
     disp_im = cv2.resize(disp_im, (w, h), interpolation=cv2.INTER_AREA)
     cv2.resizeWindow('RodentVision', w, h)
     cv2.imshow('RodentVision', disp_im)
@@ -487,35 +495,35 @@ if __name__ == '__main__':
                     if device_state == -1:
                         d['device'].start()
                         logging.info(f'Starting process for {d["device"].filename_root}')
-                        image = np.zeros((800, 1280, 3))
+                        image = blank_image()
                         cv2.putText(image, 'Initialising', (10, 60),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (255, 255, 255), 2)
                         d['image'] = image
                     if d['last_state'] == 0:
                         logging.info(f'Device {d["device"].filename_root} not connected')
-                        image = np.zeros((800, 1280, 3))
+                        image = blank_image()
                         cv2.putText(image, 'Device not found', (10, 60),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (255, 255, 255), 2)
                         d['image'] = image
                     elif d['last_state'] == 1:
                         logging.info(f'Device {d["device"].filename_root} in bootloader')
-                        image = np.zeros((800, 1280, 3))
+                        image = blank_image()
                         cv2.putText(image, 'Waiting to connect', (10, 60),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (255, 255, 255), 2)
                         d['image'] = image
                     elif d['last_state'] == 2:
                         logging.info(f'Device {d["device"].filename_root} starting')
-                        image = np.zeros((800, 1280, 3))
+                        image = blank_image()
                         cv2.putText(image, 'Starting...', (10, 60),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (255, 255, 255), 2)
                         d['image'] = image
                     elif d['last_state'] == 3:
                         logging.info(f'Device {d["device"].filename_root} connected')
-                        image = np.zeros((800, 1280, 3))
+                        image = blank_image()
                         cv2.putText(image, 'Connected', (10, 60),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (255, 255, 255), 2)
