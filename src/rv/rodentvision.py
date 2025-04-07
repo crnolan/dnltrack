@@ -35,23 +35,55 @@ camera_map = {
 }
 
 
-def create_pipeline(left_name, right_name, rgb_name, fps, triggered=False):
+def create_pipeline(left_name, right_name, rgb_name, fps, triggered=False,
+                    left_crop=None, right_crop=None, rgb_crop=None):
 
-    def _camera_setup(pipeline, camera, name, fps, triggered):
+    logger = multiprocessing.get_logger()
+
+    def _camera_setup(pipeline, camera, name, fps, triggered, crop=None):
         if triggered:
             camera.setFps(120)
             camera.initialControl.setExternalTrigger(1, 0)
         else:
             camera.setFps(fps)
-        logging.info(f'Setting autoexposure limit to {int(1/(8*fps) * 1e6)} us')
+        logger.info(f'Setting autoexposure limit to {int(1/(8*fps) * 1e6)} us')
         camera.initialControl.setAutoExposureLimit(int(1/(8*fps) * 1e6)) # microseconds
         record_xout = pipeline.create(dai.node.XLinkOut)
         record_xout.setStreamName(name)
         enc = pipeline.create(dai.node.VideoEncoder)
         enc.setDefaultProfilePreset(
-            30, dai.VideoEncoderProperties.Profile.H264_MAIN)
+            fps, dai.VideoEncoderProperties.Profile.H264_MAIN)
         enc.bitstream.link(record_xout.input)
-        return enc, record_xout
+        if crop is not None:
+            if len(crop) != 4:
+                raise ValueError('Crop must be a list of (xmin, ymin, xmax, ymax)')
+            manip = pipeline.create(dai.node.ImageManip)
+            crop_w = ((crop[2] - crop[0]) // 32) * 32
+            crop_h = ((crop[3] - crop[1]) // 8) * 8
+            crop_x = crop[0] + crop_w // 2
+            crop_y = crop[1] + crop_h // 2
+            crop_rr = dai.RotatedRect()
+            crop_rr.center.x = crop_x
+            crop_rr.center.y = crop_y
+            crop_rr.size.width = crop_w
+            crop_rr.size.height = crop_h
+            # manip.initialConfig.setCropRect(crop[0], crop[1],
+            #                                 crop[2], crop[3])
+            manip.initialConfig.setCropRotatedRect(crop_rr, normalizedCoords=False)
+            manip.out.link(enc.input)
+            if isinstance(camera, dai.node.ColorCamera):
+                camera.video.link(manip.inputImage)
+            elif isinstance(camera, dai.node.MonoCamera):
+                camera.out.link(manip.inputImage)
+        else:
+            crop_w = camera.getResolutionWidth()
+            crop_h = camera.getResolutionHeight()
+            if isinstance(camera, dai.node.ColorCamera):
+                camera.video.link(enc.input)
+            elif isinstance(camera, dai.node.MonoCamera):
+                camera.out.link(enc.input)
+
+        return enc, record_xout, (crop_w, crop_h)
 
     pipeline = dai.Pipeline()
 
@@ -65,13 +97,16 @@ def create_pipeline(left_name, right_name, rgb_name, fps, triggered=False):
     rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
     rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
 
-    left_enc, left_record = _camera_setup(pipeline, left, left_name, fps, triggered)
-    right_enc, right_record = _camera_setup(pipeline, right, right_name, fps, triggered)
-    rgb_enc, rgb_record = _camera_setup(pipeline, rgb, rgb_name, fps, triggered)
+    left_enc, left_record, left_size = _camera_setup(pipeline, left, left_name, fps,
+                                          triggered, left_crop)
+    right_enc, right_record, right_size = _camera_setup(pipeline, right, right_name, fps,
+                                            triggered, right_crop)
+    rgb_enc, rgb_record, rgb_size = _camera_setup(pipeline, rgb, rgb_name, fps,
+                                        triggered, rgb_crop)
 
-    left.out.link(left_enc.input)
-    right.out.link(right_enc.input)
-    rgb.video.link(rgb_enc.input)
+    # left.out.link(left_enc.input)
+    # right.out.link(right_enc.input)
+    # rgb.video.link(rgb_enc.input)
 
     # Camera control queues
     mono_ctrl = pipeline.createXLinkIn()
@@ -106,7 +141,12 @@ def create_pipeline(left_name, right_name, rgb_name, fps, triggered=False):
         node.warn('Trigger successful')
     """)
 
-    return pipeline, left.getResolutionSize()
+    return (
+        pipeline,
+        {'left': left_size,
+         'right': right_size,
+         'rgb': rgb_size}
+    )
 
 
 def open_container(name, codec, width, height, fps):
@@ -125,7 +165,9 @@ def run_capture(ip, filename_root,
                 triggered, encodec, fps,
                 quit_event, record_event, decode_q,
                 camera_select, trigger_event,
-                device_state):
+                device_state,
+                left_crop=None, right_crop=None, rgb_crop=None,
+                left_save=True, right_save=True, rgb_save=True):
     '''Capture images from camera and add to the queue'''
     logger = multiprocessing.get_logger()
     logger.debug(f'Capture thread started for device {ip}')
@@ -160,10 +202,12 @@ def run_capture(ip, filename_root,
                 f' creating pipeline with triggered == {triggered}')
     device_state.value = 2
     if triggered:
-        pipeline, (width, height) = create_pipeline(*sn, fps, True)
+        pipeline, video_sizes = create_pipeline(
+            *sn, fps, True, left_crop, right_crop, rgb_crop)
     else:
         logger.info(f'Creating pipeline with fps == {fps}')
-        pipeline, (width, height) = create_pipeline(*sn, fps, False)
+        pipeline, video_sizes = create_pipeline(
+            *sn, fps, False, left_crop, right_crop, rgb_crop)
         record_event.set()
     hw_device.setIrFloodLightIntensity(0.2)
 
@@ -178,10 +222,28 @@ def run_capture(ip, filename_root,
         name: hw_device.getOutputQueue(name=name, maxSize=30, blocking=False)
         for name in streams
     }
-    # Open a container for each stream
-    containers = {name: open_container(name, encodec, width,
-                                       height, fps)
-                  for name in streams}
+    # Open a container for each stream we're recording
+    containers = {}
+    for name in streams:
+        if '_left' in name and left_save:
+            containers[name] = open_container(name,
+                                              encodec,
+                                              video_sizes['left'][0],
+                                              video_sizes['left'][1],
+                                              fps)
+        elif '_right' in name and right_save:
+            containers[name] = open_container(name,
+                                              encodec,
+                                              video_sizes['right'][0],
+                                              video_sizes['right'][1],
+                                              fps)
+        elif '_rgb' in name and rgb_save:
+            containers[name] = open_container(name,
+                                              encodec,
+                                              video_sizes['rgb'][0],
+                                              video_sizes['rgb'][1],
+                                              fps)
+
     logger.debug(f'Capture process for device {filename_root} alive')
     write_count = {name: 0 for name in streams}
     capture_count = {name: 0 for name in streams}
@@ -213,7 +275,7 @@ def run_capture(ip, filename_root,
                 except queue.Full:
                     logger.debug('Decode queue full, showing reduced '
                                  'framerate')
-            if record_event.is_set():
+            if record_event.is_set() and name in containers:
                 if t0 == -1:
                     t0 = message.getTimestamp()
                 ts = message.getTimestamp() - t0
@@ -233,7 +295,7 @@ def run_capture(ip, filename_root,
 
     if record_event.is_set():
         logger.info('Writing remaining packets')
-        for name in streams:
+        for name in containers:
             message = capture_qs[name].tryGet()
             while message is not None:
                 data = message.getData()
@@ -250,6 +312,10 @@ def run_capture(ip, filename_root,
 
     logger.info(f'Closing device {filename_root}')
     hw_device.close()
+
+    for name in containers:
+        containers[name].close()
+        logger.debug('Closed MPEG container for {}'.format(name))
 
     for name in streams:
         logger.info('Capture count for camera {}: {}'.format(name, capture_count[name]))
@@ -278,7 +344,9 @@ def run_decode(decode_q, display_q, quit_event, name, codec):
 
 
 class DeviceProxy():
-    def __init__(self, ip, group, name, fps, width, height, triggered):
+    def __init__(self, ip, group, name, fps, width, height, triggered,
+                 left_crop=None, right_crop=None, rgb_crop=None,
+                 left_save=True, right_save=True, rgb_save=True):
         self.ip = ip
         self.group = group
         self.name = name
@@ -286,6 +354,12 @@ class DeviceProxy():
         self.width = width
         self.height = height
         self.triggered = triggered
+        self.left_crop = left_crop
+        self.right_crop = right_crop
+        self.rgb_crop = rgb_crop
+        self.left_save = left_save
+        self.right_save = right_save
+        self.rgb_save = rgb_save
         self.encodec = 'h264'
         self.decodec = 'h264'
         self.filename_root = f'group-{group}_camera-{name}'
@@ -319,7 +393,9 @@ class DeviceProxy():
                       self.triggered, self.encodec, self.fps,
                       self.capture_quit, self.record_event, self.decode_q,
                       self.camera_select, self.trigger_event,
-                      self.device_state],
+                      self.device_state,
+                      self.left_crop, self.right_crop, self.rgb_crop,
+                      self.left_save, self.right_save, self.rgb_save],
                 daemon=True)
             logging.debug(f'Starting capture thread for device '
                           f'{self.filename_root}')
@@ -382,10 +458,22 @@ class DeviceProxy():
         return self.record_event.is_set()
 
 
-def tile_images(devices, image_grid, width, height):
-    images = [[devices[i]['image'] if i >= 0 else np.zeros((height, width, 3), dtype=np.uint8)
-                for i in row]
-                for row in image_grid]
+def tile_images(devices, image_grid):
+    width = max([devices[i]['image'].shape[1] for i in range(len(devices))])
+    height = max([devices[i]['image'].shape[0] for i in range(len(devices))])
+    images = []
+    for row in image_grid:
+        image_row = []
+        for i in row:
+            image = np.zeros((height, width, 3), dtype=np.uint8)
+            dshape = devices[i]['image'].shape
+            if i >= 0:
+                image[:dshape[0], :dshape[1], :] = devices[i]['image']
+            image_row.append(image)
+        images.append(image_row)
+    # images = [[devices[i]['image'] if i >= 0 else np.zeros((height, width, 3), dtype=np.uint8)
+    #             for i in row]
+    #             for row in image_grid]
     return np.concatenate([np.concatenate(row, axis=1) for row in images], axis=0)
 
 
@@ -423,14 +511,32 @@ if __name__ == '__main__':
 
     def blank_image():
         return np.zeros((height, width, 3), dtype=np.uint8)
-    
+
     devices = []
     for group_name, cameras in config['groups'].items():
         for camera_name, details in cameras.items():
+            crop = {'left': None, 'right': None, 'rgb': None}
+            save = {'left': True, 'right': True, 'rgb': True}
+            if camera_name in config and 'crop' in config[camera_name]:
+                for key in ['left', 'right', 'rgb']:
+                    if key in config[camera_name]['crop']:
+                        crop[key] = config[camera_name]['crop'][key]
+            if camera_name in config and 'save' in config[camera_name]:
+                for key in ['left', 'right', 'rgb']:
+                    if key in config[camera_name]['save']:
+                        save[key] = config[camera_name]['save'][key]
+            logging.info(f'Crop for {camera_name} == {crop}')
+            logging.info(f'Save for {camera_name} == {save}')
             devices.append({
                 'device': DeviceProxy(details['ip'], group_name, camera_name,
                                       config['fps'], width, height,
-                                      config['triggered']),
+                                      config['triggered'],
+                                      crop['left'],
+                                      crop['right'],
+                                      crop['rgb'],
+                                      save['left'],
+                                      save['right'],
+                                      save['rgb']),
                 'last_state': -2,
                 'image': blank_image()
             })
@@ -439,19 +545,18 @@ if __name__ == '__main__':
     n_streams = len(devices)
     grid_w = int(np.ceil(np.sqrt(n_streams)))
     grid_h = int(np.ceil(n_streams / grid_w))
-    aspect = (1280*grid_w)/(800*grid_h)
     image_grid = np.arange(grid_w * grid_h)
     image_grid[n_streams:] = -1
     image_grid = image_grid.reshape((grid_h, grid_w))
-
-    disp_im = tile_images(devices, image_grid, width, height)
-    logging.info(f'disp_im dims: {disp_im.shape} and dtype: {disp_im.dtype}')
+    disp_im = tile_images(devices, image_grid)
+    aspect = (disp_im.shape[1] / disp_im.shape[0])
+    logging.debug(f'Tiled image dims: {disp_im.shape} and dtype: {disp_im.dtype}')
     # disp_im = np.concatenate([np.concatenate([devices[i]['image'] for i in row], axis=1)
     #                           for row in image_grid], axis=0)
     _, _, winw, winh = cv2.getWindowImageRect('RodentVision')
     w = min(winw, int(aspect * winh))
     h = min(winh, int(winw / aspect))
-    logging.info(f'width {w} and height {h}')
+    logging.debug(f'Rendering width {w} and height {h}')
     disp_im = cv2.resize(disp_im, (w, h), interpolation=cv2.INTER_AREA)
     cv2.resizeWindow('RodentVision', w, h)
     cv2.imshow('RodentVision', disp_im)
@@ -459,17 +564,21 @@ if __name__ == '__main__':
     try:
         key = None
         recording = not config['triggered']
+        selected_camera = 'rgb'
         while True:
             changed = False
             if key == ord('q'):
                 raise KeyboardInterrupt()
             elif key == ord('0'):
+                selected_camera = 'rgb'
                 for d in devices:
                     d['device'].select_camera(0)
             elif key == ord('1'):
+                selected_camera = 'left'
                 for d in devices:
                     d['device'].select_camera(1)
             elif key == ord('2'):
+                selected_camera = 'right'
                 for d in devices:
                     d['device'].select_camera(2)
             elif key == ord(' '):
@@ -496,35 +605,35 @@ if __name__ == '__main__':
                         d['device'].start()
                         logging.info(f'Starting process for {d["device"].filename_root}')
                         image = blank_image()
-                        cv2.putText(image, 'Initialising', (10, 60),
+                        cv2.putText(image, 'Initialising', (10, 90),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (255, 255, 255), 2)
                         d['image'] = image
                     if d['last_state'] == 0:
                         logging.info(f'Device {d["device"].filename_root} not connected')
                         image = blank_image()
-                        cv2.putText(image, 'Device not found', (10, 60),
+                        cv2.putText(image, 'Device not found', (10, 90),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (255, 255, 255), 2)
                         d['image'] = image
                     elif d['last_state'] == 1:
                         logging.info(f'Device {d["device"].filename_root} in bootloader')
                         image = blank_image()
-                        cv2.putText(image, 'Waiting to connect', (10, 60),
+                        cv2.putText(image, 'Waiting to connect', (10, 90),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (255, 255, 255), 2)
                         d['image'] = image
                     elif d['last_state'] == 2:
                         logging.info(f'Device {d["device"].filename_root} starting')
                         image = blank_image()
-                        cv2.putText(image, 'Starting...', (10, 60),
+                        cv2.putText(image, 'Starting...', (10, 90),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (255, 255, 255), 2)
                         d['image'] = image
                     elif d['last_state'] == 3:
                         logging.info(f'Device {d["device"].filename_root} connected')
                         image = blank_image()
-                        cv2.putText(image, 'Connected', (10, 60),
+                        cv2.putText(image, 'Connected', (10, 90),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (255, 255, 255), 2)
                         d['image'] = image
@@ -541,14 +650,17 @@ if __name__ == '__main__':
                 images = []
                 for d in devices:
                     image = d['image']
-                    cv2.putText(image, f'{d["device"].group}-{d["device"].name}', (10, 30),
+                    cv2.putText(image,
+                                f'{d["device"].group}-{d["device"].name}-{selected_camera}',
+                                (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                     if d['device'].is_recording():
                         cv2.putText(image, 'Recording', (10, 60),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                     images.append(image)
                 tdraw = time.time()
-                disp_im = tile_images(devices, image_grid, width, height)
+                disp_im = tile_images(devices, image_grid)
+                aspect = (disp_im.shape[1] / disp_im.shape[0])
                 # disp_im = np.concatenate([np.concatenate([images[i] for i in row], axis=1)
                 #                           for row in image_grid], axis=0)
                 tconcat = time.time()
