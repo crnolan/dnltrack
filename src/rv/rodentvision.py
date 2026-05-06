@@ -40,6 +40,20 @@ def create_pipeline(left_name, right_name, rgb_name, fps, triggered=False,
 
     logger = multiprocessing.get_logger()
 
+    def _crop_setup(pipeline, tl_x, tl_y, br_x, br_y):
+        manip = pipeline.create(dai.node.ImageManip)
+        crop_w = ((br_x - tl_x) // 32) * 32
+        crop_h = ((br_y - tl_y) // 8) * 8
+        crop_x = tl_x + crop_w // 2
+        crop_y = tl_y + crop_h // 2
+        crop_rr = dai.RotatedRect()
+        crop_rr.center.x = crop_x
+        crop_rr.center.y = crop_y
+        crop_rr.size.width = crop_w
+        crop_rr.size.height = crop_h
+        manip.initialConfig.setCropRotatedRect(crop_rr, normalizedCoords=False)
+        return manip, (crop_w, crop_h)
+
     def _camera_setup(pipeline, camera, name, fps, triggered, crop=None):
         if triggered:
             camera.setFps(120)
@@ -57,33 +71,15 @@ def create_pipeline(left_name, right_name, rgb_name, fps, triggered=False,
         if crop is not None:
             if len(crop) != 4:
                 raise ValueError('Crop must be a list of (xmin, ymin, xmax, ymax)')
-            manip = pipeline.create(dai.node.ImageManip)
-            crop_w = ((crop[2] - crop[0]) // 32) * 32
-            crop_h = ((crop[3] - crop[1]) // 8) * 8
-            crop_x = crop[0] + crop_w // 2
-            crop_y = crop[1] + crop_h // 2
-            crop_rr = dai.RotatedRect()
-            crop_rr.center.x = crop_x
-            crop_rr.center.y = crop_y
-            crop_rr.size.width = crop_w
-            crop_rr.size.height = crop_h
-            # manip.initialConfig.setCropRect(crop[0], crop[1],
-            #                                 crop[2], crop[3])
-            manip.initialConfig.setCropRotatedRect(crop_rr, normalizedCoords=False)
+            manip, (crop_w, crop_h) = _crop_setup(pipeline, crop[0], crop[1], crop[2], crop[3])
             manip.out.link(enc.input)
-            if isinstance(camera, dai.node.ColorCamera):
-                camera.video.link(manip.inputImage)
-            elif isinstance(camera, dai.node.MonoCamera):
-                camera.out.link(manip.inputImage)
         else:
+            # crop = [0, 0, camera.getResolutionWidth(), camera.getResolutionHeight()]
+            manip = None
             crop_w = camera.getResolutionWidth()
             crop_h = camera.getResolutionHeight()
-            if isinstance(camera, dai.node.ColorCamera):
-                camera.video.link(enc.input)
-            elif isinstance(camera, dai.node.MonoCamera):
-                camera.out.link(enc.input)
+        return enc, record_xout, manip, (crop_w, crop_h)
 
-        return enc, record_xout, (crop_w, crop_h)
 
     pipeline = dai.Pipeline()
 
@@ -97,12 +93,30 @@ def create_pipeline(left_name, right_name, rgb_name, fps, triggered=False,
     rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
     rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
 
-    left_enc, left_record, left_size = _camera_setup(pipeline, left, left_name, fps,
+    left_enc, left_record, left_manip, left_size = _camera_setup(pipeline, left, left_name, fps,
                                           triggered, left_crop)
-    right_enc, right_record, right_size = _camera_setup(pipeline, right, right_name, fps,
+    right_enc, right_record, right_manip, right_size = _camera_setup(pipeline, right, right_name, fps,
                                             triggered, right_crop)
-    rgb_enc, rgb_record, rgb_size = _camera_setup(pipeline, rgb, rgb_name, fps,
+    rgb_enc, rgb_record, rgb_manip, rgb_size = _camera_setup(pipeline, rgb, rgb_name, fps,
                                         triggered, rgb_crop)
+    depth = pipeline.create(dai.node.StereoDepth)
+    left.out.link(depth.left)
+    right.out.link(depth.right)
+    if rgb_manip is not None:
+        rgb.video.link(rgb_manip.inputImage)
+        rgb_manip.out.link(rgb_enc.input)
+    else:
+        rgb.video.link(rgb_enc.input)
+    if left_manip is not None:
+        depth.rectifiedLeft.link(left_manip.inputImage)
+        left_manip.out.link(left_enc.input)
+    else:
+        depth.rectifiedLeft.link(left_enc.input)
+    if right_manip is not None:
+        depth.rectifiedRight.link(right_manip.inputImage)
+        right_manip.out.link(right_enc.input)
+    else:
+        depth.rectifiedRight.link(right_enc.input)
 
     # left.out.link(left_enc.input)
     # right.out.link(right_enc.input)
